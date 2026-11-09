@@ -19,9 +19,8 @@ and the version follows [Semantic Versioning](https://semver.org/).
 - Blackboard (`param`, `paramset`, `paramrename`, `category`, `attr`) and subgraphs (`newsubgraph`, `subparam`,
   `addsubgraph`, `refreshparents`, `tosubgraph`).
 - Clipboard (`clipcopy` / `clippaste`) for contexts, blocks, operators and parameters, across graphs and `Apply` calls.
-- Verification: `VfxCoverage.Run` reports 21/21 contexts, 244/244 operators and 135/135 blocks creatable
-  (236/244 operators wired); `VfxSelfTest.Run` runs 35 regression checks.
+- Verification: `VfxCoverage.Run` reports every library entry creatable: URP 18/18 contexts, 243/243 operators,
+  135/135 blocks (235/243 operators wired); HDRP 21/21, 244/244, 135/135 (236/244 wired). `VfxSelfTest.Run` runs
+  35 regression checks and passes 35/35 on URP and HDRP.
 - `Skills~/vfx-graph/SKILL.md`, `Samples~/SimpleLoopExample.vfxscript`, and a `package.json` pinning Unity `6000.6`
   with `com.unity.visualeffectgraph` `17.6.0`.
-
-### Notes
