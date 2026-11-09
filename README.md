@@ -67,13 +67,13 @@ Editor, and reads back a plain-text **description** of the result, including com
 | **Subgraphs** | Create operator and block subgraph assets, define their inputs and outputs, use a subgraph as an operator, block or context, refresh the graphs that use a subgraph, and **convert a selection of operators into a subgraph operator** (boundary links become its interface). |
 | **Clipboard** | Copy and paste operators, parameters, whole contexts with their blocks and data, and single blocks, inside one graph or across graphs, keeping values, settings and internal links. |
 | **Safety** | A script that fails on any line rolls the graph back to its last good state, so a half-applied edit never stays behind. |
-| **Verification** | Library coverage counter, and a 39-check regression self-test you can run in one call. |
+| **Verification** | Library coverage counter, and a 35-check regression self-test you can run in one call. |
 
 ## Requirements
 
 - **Unity 6000.6** (tested on 6000.6.7f1). The package pins `"unity": "6000.6"`.
 - **VFX Graph 17.6.0**, which ships with Unity 6000.6 and is declared as a dependency. Tested with **URP 17.6.0**
-  (this demo) and **HDRP 17.6.0**; the self-test passes 39/39 on both.
+  (this demo) and **HDRP 17.6.0**; the self-test passes 35/35 on both.
 - The **`unity` CLI** (package `com.unity.pipeline`, experimental; this demo uses `0.10.0-exp.1`) to drive the Editor from a shell. The package's C# does
   not depend on it; the CLI is only the transport.
 - An agent that can run shell commands, for example **Claude Code** or **OpenCode**.
@@ -105,7 +105,7 @@ automatically, with no manifest entry needed. Alternatively, keep it anywhere an
 unity command eval 'return UnityEditor.Compilation.CompilationPipeline.GetAssemblyDefinitionFilePathFromAssemblyName("Unity.Testing.VisualEffectGraph.Editor");' --format json
 ```
 
-The path must point into `Packages/com.fenyce.vfxagent/`. Then run the self-test (see below) and expect `39/39`.
+The path must point into `Packages/com.fenyce.vfxagent/`. Then run the self-test (see below) and expect `35/35`.
 
 > **Only one copy.** The package's assembly has a fixed name (see [How it works](#how-it-works)). If an older copy
 > of the tool exists under `Assets/` (for example `Assets/VfxAuthoring/`), delete it first, in Edit mode. Otherwise Unity reports
@@ -222,7 +222,7 @@ The result is a line-by-line log:
 | | `C:<ctx>/<slot>` (context input) |
 | | `P:<output param>` (a subgraph's output parameter) |
 
-Quote a whole spec that contains spaces: `"B:Spawn/Constant Spawn Rate/Rate"`. An operator `<id>` can also be an existing operator's type: `O:Multiply`, `Op:Multiply#1.b`.
+Quote a whole spec that contains spaces: `"B:Spawn/Constant Spawn Rate/Rate"`.
 
 ### Values
 
@@ -266,7 +266,6 @@ share a name (`And` exists as both a logical and a bitwise operator), add `#k`, 
 | `opsetting <OperatorType[#n]> <name>=<v> ...` | operator settings |
 | `enable` / `disable <ctx> "<block>"` | toggle a block |
 | `space <ctx> "<block>" <slot> <None\|Local\|World>` | slot space |
-| `dataspace <ctx> <Local\|World>` | coordinate space of a whole particle system |
 | `hlsl <ctx> "<block>" file=<path> function=<name>` | add or update a Custom HLSL block from a `.hlsl` file |
 
 ### Wire
@@ -440,14 +439,14 @@ a script. (`tosubgraph` writes its new asset immediately; a rolled-back conversi
 ## Verification: coverage and self-test
 
 ```csharp
-return VfxSelfTest.Run(@"C:/work/selftest.md");   // -> "selftest: 39/39 checks passed"
+return VfxSelfTest.Run(@"C:/work/selftest.md");   // -> "selftest: 35/35 checks passed"
 return VfxCoverage.Run(@"C:/work/coverage.md");   // -> creation, reachability and wiring counts per kind
 ```
 
-- **`VfxSelfTest`** builds fresh graphs under `Assets/VfxTests/SelfTest/` from the package template and checks 39
-  expected results across 11 scenarios: Blackboard, errors, subgraphs, unlink/remove, rollback, flow, clipboard
+- **`VfxSelfTest`** builds fresh graphs under `Assets/VfxTests/SelfTest/` from the package template and checks 35
+  expected results across 10 scenarios: Blackboard, errors, subgraphs, unlink/remove, rollback, flow, clipboard
   (operators and contexts) and `tosubgraph`. It's the gate for any change to the tool: when the interpreter was
-  deliberately replaced with an older version, the score dropped to 19/35. It passes 39/39 on URP and HDRP.
+  deliberately replaced with an older version, the score dropped to 19/35. It passes 35/35 on URP and HDRP.
 - **`VfxCoverage`** creates every context, operator and block of the node library, reports which are reachable by
   type name and by library name, and tries to wire every operator's output into a compatible input
   (17.6.0, URP: 235 of 243 operators wired, 2 have no output, 6 need a block configured for their shape).
