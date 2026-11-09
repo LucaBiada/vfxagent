@@ -16,7 +16,7 @@ Engine-internal types are not visible even to this assembly (VisualEffectResourc
 VFXCompilationMode, VisualEffectAssetDesc): reach them through reflection (see LoadGraph, CompileReportToFile).
 
 ## After changing the tool
-Run `VfxSelfTest.Run(@"<report path>")` and require `35/35` (or the current total) before using the changed tool.
+Run `VfxSelfTest.Run(@"<report path>")` and require `39/39` (or the current total) before using the changed tool.
 Run `VfxCoverage.Run` after library-related changes.
 
 ## Calls (from `unity command eval ... --result-only '<code>'`)
@@ -157,7 +157,7 @@ context made by `addctx`, `addsubgraph ctx` or `clippaste` earlier in the same s
   `P:<name>` as a DESTINATION is the subgraph interface: a parameter with `isOutput == true` (made by
   `subparam out`) has no output slot, so an internal producer is linked into its `inputSlots[0]`; a non-output
   parameter is an error there (link into an actual input instead).
-  e.g. `link2 P:Wind B:Init/Velocity/velocity`  |  `link2 O:density1.Result Op:mul1.a`  |
+  e.g. `link2 P:Wind B:Init/Velocity/velocity`. An operator `<id>` can also be an existing operator's type: `O:Multiply`, `Op:Multiply#1.b`.  |  `link2 O:density1.Result Op:mul1.a`  |
   `link2 O:mul1 P:Result` (feeds the subgraph's `out` interface parameter `Result`)
 - `unlink <dst>` - remove the data link(s) on that input slot (`VFXSlot.UnlinkAll`); errors if nothing is linked.
   `unlink <src> <dst>` - remove only the link between that source (`P:`/`O:`, same syntax as `link2`) and that input
@@ -167,6 +167,7 @@ context made by `addctx`, `addsubgraph ctx` or `clippaste` earlier in the same s
 - `setin <dst> <value>` - set a value on an operator / block / context input slot (same dst syntax as `link2`).
   e.g. `setin Op:sub1.a 2.5`
 - `space <ctx> "<block>" <slot> <None|Local|World>` - set a spaceable slot's space (e.g. a skinned mesh transform -> `World`).
+- `dataspace <ctx> <Local|World>` - coordinate space of the whole particle system (the Space setting of its contexts). e.g. `dataspace Init World`
 - `link "<param>" <ctx> "<block>" <slot>` - link an exposed parameter to a block input.
 - `linkop "<param>" <OperatorType> <slot>` - link an exposed parameter to an operator input.
 - `linkctx "<param>" <ctx> <slot>` - link an exposed parameter to a context input (e.g. a mesh output's mesh).

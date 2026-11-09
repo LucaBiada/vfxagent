@@ -24,7 +24,7 @@ each op.
 - **Clipboard** — `clipcopy`, `clippaste` (contexts, blocks, operators, parameters; survives `open`).
 - **Safety** — a failing line stops the script and rolls the whole graph back (in memory) to the last checkpoint.
 - **Verification** — `VfxCoverage.Run` (library coverage: 21/21 contexts, 244/244 operators, 135/135 blocks
-  creatable; 236/244 operators wired) and `VfxSelfTest.Run` (35 regression checks).
+  creatable; 236/244 operators wired) and `VfxSelfTest.Run` (39 regression checks).
 
 ## Known limits
 

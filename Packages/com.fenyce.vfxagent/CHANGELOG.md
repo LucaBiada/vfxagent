@@ -4,6 +4,13 @@ All notable changes to this package are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the version follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-11-09
+
+### Added
+- `dataspace <ctx> <Local|World>`: set a particle system's coordinate space.
+- Link endpoints (`link2`, `unlink`, `setin`) accept an existing operator by type (`O:Multiply`, `Op:Multiply#1.b`), not only ids made earlier in the script.
+- Self-test: 4 new checks (39 in total).
+
 ## [0.1.0] - 2026-11-09
 
 ### Added

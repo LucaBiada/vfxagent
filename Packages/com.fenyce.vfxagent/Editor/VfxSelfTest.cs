@@ -202,7 +202,13 @@ public static class VfxSelfTest
                 Desc(conv, "in  Rate : Single = 64  <- O"),
                 Desc(conv, ".Rate"),
                 Desc(convSub, "output 'Rate' : Single"),
-                Desc(convSub, "<- O"))
+                Desc(convSub, "<- O")),
+            C("dataspace_and_op_by_type", S($"copy {Src} {Dir}/Space.vfx", "dataspace Init World", "addop Multiply m1",
+                    "setin Op:Multiply.b 3", "link2 O:Multiply \"B:Spawn/Constant Spawn Rate/Rate\"", "save"),
+                Log("dataspace Init = World"),
+                Log("ERROR", not: true),
+                Desc($"{Dir}/Space.vfx", "in  Rate : Single = 64  <- O"),
+                Desc($"{Dir}/Space.vfx", "b : Single = 3"))
         };
     }
 

@@ -33,10 +33,11 @@
 //            subgraph operator asset and replace them with one subgraph node (script id sub1); boundary links become its inputs/outputs
 //   addsubgraph op <asset path> <id>   /   addsubgraph block <ctx> <asset path>   /   addsubgraph ctx <asset path> <id>   reference an existing subgraph asset
 //   addvariant <ctx|op|block> "<libraryName>" <id|ctx> [setting=value ...]   new node from a VFXLibrary descriptor, picked by the exact name the VFX Graph node search shows (quote names with spaces or '|'; disambiguates entries that share a type: Log/Log2/Log10, Normalize/Safe Normalize, 'Output Particle|...'); a trailing 'Name#k' (1-based) picks the k-th descriptor with that name in the kind's list order (And#2 = 2nd 'And'). ctx/op: 2nd=name, 3rd=id; block: 2nd=ctx, 3rd=name.
-//   link2 <src> <dst>        src: P:<param> | O:<id>[.slot]    dst: Op:<id>.<slot> | B:<ctx>/<block>/<slot> | C:<ctx>/<slot> | P:<output param>   (quote specs with spaces)
+//   link2 <src> <dst>        src: P:<param> | O:<id>[.slot]    dst: Op:<id>.<slot> | B:<ctx>/<block>/<slot> | C:<ctx>/<slot> | P:<output param>   (quote specs with spaces; <id> may also be an existing operator's type, Multiply or Multiply#1)
 //   unlink <dst>             remove every data link into an input (same dst syntax); unlink <src> <dst> removes just that one link
 //   setin <dst> <value>      set a value on an operator / block / context input slot (same dst syntax)
 //   space <ctx> "<block>" <slot> <None|Local|World>   set a spaceable slot's space (e.g. a skinned mesh transform -> World)
+//   dataspace <ctx> <Local|World>   coordinate space of the particle system (the Space setting of its contexts)
 //   link "<param>" <ctx> "<block>" <slot>   /  linkop "<param>" <OperatorType> <slot>   /  linkctx "<param>" <ctx> <slot>
 //   hlsl <ctx> "<block name>" file=<path> function=<name>   add or update a Custom HLSL block using a .hlsl file
 //   refreshparents <subgraph asset path>    PrepareGraph + force reimport every root .vfx in Assets that depends on the subgraph
@@ -396,6 +397,13 @@ public static class VfxGraphOps
                         var dst = InSlot(g, ops, t[1]); dst.value = ParseValue(t[2], dst.property.type);
                         dirty = true; log.AppendLine($"{lineNo}: setin {t[1]} = {t[2]}"); break;
                     }
+                    case "dataspace":   // dataspace <ctx> <Local|World>   coordinate space of the particle system (the Space setting of its contexts)
+                    {
+                        var c = Ctx(g, t[1]); var d = c.GetData() ?? throw new Exception("context " + t[1] + " has no data");
+                        var pr = d.GetType().GetProperty("space", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance) ?? throw new Exception("no space on " + d.GetType().Name);
+                        pr.SetValue(d, Enum.Parse(pr.PropertyType, t[2]));
+                        dirty = true; log.AppendLine($"{lineNo}: dataspace {t[1]} = {t[2]}"); break;
+                    }
                     case "space":   // space <ctx> "<block>" <slot> <None|Local|World>   space of a spaceable slot (position, transform...)
                     {
                         var s = VfxGraphTool.Input(Block(g, t[1], t[2]), t[3]);
@@ -677,13 +685,21 @@ public static class VfxGraphOps
     static IVFXSlotContainer OpById(Dictionary<string, IVFXSlotContainer> ops, string id) =>
         ops.TryGetValue(id, out var o) ? o : throw new Exception($"no operator id '{id}' (made by addop/addsubgraph op in this script); ids: [{string.Join(", ", ops.Keys)}]");
 
+    // a script id first, else an existing operator by type selector (Multiply, Multiply#1) as setop accepts
+    static IVFXSlotContainer OpById(VFXGraph g, Dictionary<string, IVFXSlotContainer> ops, string id)
+    {
+        if (ops.TryGetValue(id, out var o)) return o;
+        try { return Op(g, id); } catch { }
+        throw new Exception($"no operator id '{id}' (made by addop/addsubgraph op in this script) nor existing operator of that type; ids: [{string.Join(", ", ops.Keys)}]");
+    }
+
     static VFXSlot OutSlot(VFXGraph g, Dictionary<string, IVFXSlotContainer> ops, string spec)
     {
         if (spec.StartsWith("P:")) return Param(g, spec.Substring(2)).outputSlots[0];
         if (spec.StartsWith("O:"))
         {
             var r = spec.Substring(2); int dot = r.IndexOf('.');
-            var op = OpById(ops, dot < 0 ? r : r.Substring(0, dot));
+            var op = OpById(g, ops, dot < 0 ? r : r.Substring(0, dot));
             return dot < 0 ? op.outputSlots[0] : FindSlot(op.outputSlots, r.Substring(dot + 1));
         }
         throw new Exception("source must be P:<param> or O:<id>[.slot]: " + spec);
@@ -701,7 +717,7 @@ public static class VfxGraphOps
         {
             var r = spec.Substring(3); int dot = r.IndexOf('.');
             if (dot < 0) throw new Exception("operator input needs a slot: Op:<id>.<slot>");
-            return FindSlot(OpById(ops, r.Substring(0, dot)).inputSlots, r.Substring(dot + 1));
+            return FindSlot(OpById(g, ops, r.Substring(0, dot)).inputSlots, r.Substring(dot + 1));
         }
         if (spec.StartsWith("B:"))
         {
