@@ -1,0 +1,16 @@
+# 05 - Fixed: copy Broken.vfx, diagnose it, and repair the two values that hide the effect.
+# Target: Assets/VfxAgentDemo/Effects/Fixed.vfx
+
+copy Assets/VfxAgentDemo/Effects/Broken.vfx Assets/VfxAgentDemo/Effects/Fixed.vfx
+
+# `describe` dumps the graph before we touch it. Read the dump: it shows
+#   Rate : Single = 0                          (Spawn / "Constant Spawn Rate")
+#   A : Single = 0   B : Single = 0            (Init / "|Set|_Lifetime|Random Uniform")
+# Those are exactly the two reasons nothing is visible: no particles are born, and
+# a particle's lifetime is zero seconds. The describe output is in BuildLog.txt.
+describe
+
+set Spawn "Constant Spawn Rate" Rate=64
+set Init "Lifetime" A=0.8 B=1.2
+save
+compile

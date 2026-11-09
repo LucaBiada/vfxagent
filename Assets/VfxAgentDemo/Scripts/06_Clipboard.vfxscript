@@ -1,0 +1,27 @@
+# 06 - Clipboard: duplicate a whole system, then paste one block into the copy.
+# Target: Assets/VfxAgentDemo/Effects/TwoSystems.vfx
+
+copy Packages/com.unity.visualeffectgraph/Editor/Templates/Simple_Loop.vfx Assets/VfxAgentDemo/Effects/TwoSystems.vfx
+
+# 1. Copy Init + Update + Output of the template system and paste them as a second
+#    system 600 graph units below the first one.
+clipcopy C:Init C:Update C:Output
+clippaste 0 -600
+# A pasted system has no spawner yet (the window behaves the same): feed it from the existing one,
+# and move its emitter 2 m to the side so the two systems are easy to tell apart.
+linkflow Spawn #pastectx1
+set #pastectx1 "Position Shape" arcSphere.sphere.transform.position=(2,0,0)
+
+# 2. Change the source Linear Drag BEFORE copying the block: the clipboard carries the
+#    value, so the pasted block arrives with dragCoefficient = 2.5.
+set Update "Linear Drag" dragCoefficient=2.5
+clipcopy "B:Update/Linear Drag"
+
+# 3. Append the copied block to the pasted Update context. The contexts pasted above get
+#    ids in clipboard order: #pastectx1 = Init, #pastectx2 = Update, #pastectx3 = Output.
+#    The appended block is the second "Linear Drag" in that context; give it its own value.
+clippaste into #pastectx2
+set #pastectx2 "Linear Drag#1" dragCoefficient=6
+
+save
+compile

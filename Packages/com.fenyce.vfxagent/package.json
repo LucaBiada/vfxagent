@@ -1,0 +1,26 @@
+{
+  "name": "com.fenyce.vfxagent",
+  "version": "0.1.0",
+  "displayName": "VFX Agent",
+  "unity": "6000.6",
+  "description": "Editor-only VFX Graph authoring and diagnostics API (VfxGraphTool, VfxGraphOps, VfxCoverage) built on the VFX Graph package's internal editor API, driven from the unity CLI.",
+  "keywords": [
+    "vfx",
+    "visual-effect-graph",
+    "editor",
+    "authoring",
+    "agent"
+  ],
+  "dependencies": {
+    "com.unity.visualeffectgraph": "17.6.0"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Luca Biada - Fenyce"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LucaBiada/vfxagent.git"
+  },
+  "documentationUrl": "https://github.com/LucaBiada/vfxagent#readme"
+}

@@ -1,0 +1,11 @@
+# 04 - Broken: a graph that shows nothing, on purpose. Two independent causes:
+#   1) Spawn emits 0 particles per second (Rate = 0);
+#   2) any particle that did exist dies immediately (lifetime uniform A = B = 0).
+# 05_Fixed.vfxscript uses `describe` to find both and repairs them.
+# Target: Assets/VfxAgentDemo/Effects/Broken.vfx
+
+copy Packages/com.unity.visualeffectgraph/Editor/Templates/Simple_Loop.vfx Assets/VfxAgentDemo/Effects/Broken.vfx
+set Spawn "Constant Spawn Rate" Rate=0
+set Init "Lifetime" A=0 B=0
+save
+compile

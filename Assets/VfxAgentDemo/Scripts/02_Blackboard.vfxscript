@@ -1,0 +1,23 @@
+# 02 - Blackboard: categories, tooltips, a Range, an enum int and a custom attribute.
+# Target: Assets/VfxAgentDemo/Effects/Tunable.vfx
+
+copy Packages/com.unity.visualeffectgraph/Editor/Templates/Simple_Loop.vfx Assets/VfxAgentDemo/Effects/Tunable.vfx
+
+# Two categories keep the Inspector tidy.
+category add "Emission"
+category add "Motion"
+
+# Emission rate: exposed, documented, clamped to 0..500 and linked into Spawn.
+param float "Rate" 200
+paramset "Rate" tooltip="Particles emitted per second" range=0;500 category="Emission" value=200
+link "Rate" Spawn "Constant Spawn Rate" Rate
+
+# An int shown as a dropdown thanks to its enum values (0=Calm, 1=Storm, 2=Burst).
+param int "Mode" 0
+paramset "Mode" tooltip="How lively the motion feels" enum=Calm;Storm;Burst category="Motion"
+
+# A custom attribute any block/HLSL can read per particle.
+attr add "heat" float "particle temperature"
+
+save
+compile

@@ -1,0 +1,39 @@
+# Simple Loop example (op-script for VfxGraphOps)
+#
+# Builds a small, tunable looping particle effect starting from the VFX Graph package's
+# template, then exposes a couple of parameters so the values can be adjusted in the
+# Visual Effect Inspector without touching the graph.
+#
+#   Template: Packages/com.unity.visualeffectgraph/Editor/Templates/Simple_Loop.vfx
+#
+# The `copy` below makes a NEW asset under Assets/; the package template is never modified.
+# `save` + `compile` (systems > 0) confirm the effect still compiles after the edits.
+#
+# Run it (from the `unity` CLI):
+#   put this in a .cs file and run `unity command eval --file <that file> --format json`:
+#     return VfxGraphOps.Apply(System.IO.File.ReadAllText(@"<path to this .vfxscript>"));
+# (Apply takes the script TEXT and returns the log; for long scripts use
+#  VfxGraphOps.ApplyToFile(scriptText, reportPath) and read the report file.) See Skills~/vfx-graph/SKILL.md for the full op reference.
+#
+# Before editing further, run `describe` once: it prints the exact block and slot names
+# (the "Constant Spawn Rate" block below and its `Rate` slot are verified from the template).
+
+# 1. Copy the template to a project asset and make it the current target.
+copy Packages/com.unity.visualeffectgraph/Editor/Templates/Simple_Loop.vfx Assets/VFX/SimpleLoopExample.vfx
+
+# 2. Re-tune the spawn rate directly (the template's Spawn context holds one
+#    "Constant Spawn Rate" block with a `Rate` input, value 64).
+set Spawn "Constant Spawn Rate" Rate=96
+
+# 3. Expose the same rate as an exposed parameter, then link it into the block's Rate slot
+#    (the link replaces the literal value with the parameter reference).
+param float "Emission Rate" 96
+link "Emission Rate" Spawn "Constant Spawn Rate" Rate
+
+# 4. Expose a particle size parameter for later tuning in the Inspector.
+param float "Particle Size" 0.15
+
+# 5. Save, compile (check systems > 0), and print a Describe dump into the report.
+save
+compile
+describe

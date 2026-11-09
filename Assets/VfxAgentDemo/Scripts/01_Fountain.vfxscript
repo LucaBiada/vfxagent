@@ -1,0 +1,22 @@
+# 01 - Fountain: expose the spawn rate, tighten the jet, add Turbulence, blend Additive.
+# Target: Assets/VfxAgentDemo/Effects/Fountain.vfx
+# Run with VfxGraphOps (see Assets/VfxAgentDemo/README.md).
+
+# Start from the built-in VFX Graph template (the package template is only read).
+copy Packages/com.unity.visualeffectgraph/Editor/Templates/Simple_Loop.vfx Assets/VfxAgentDemo/Effects/Fountain.vfx
+
+# Expose a float on the Blackboard and drive the Spawn block with it.
+param float "Rate" 200
+link "Rate" Spawn "Constant Spawn Rate" Rate
+
+# Slow speeds (2..3 m/s) plus DirectionBlend=1: use only the given up direction, so the
+# cone is as narrow as possible instead of mixing in the per-particle random direction.
+set Init "Velocity" MinSpeed=2 MaxSpeed=3 DirectionBlend=1
+
+# Turbulence makes the stream wobble and break up over its lifetime.
+addblock Update Turbulence
+
+setting Output blendMode=Additive
+
+save
+compile

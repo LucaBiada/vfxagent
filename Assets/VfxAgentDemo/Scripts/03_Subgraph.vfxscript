@@ -1,0 +1,26 @@
+# 03 - Subgraph: build a tiny operator subgraph (Y = X + X), then use it in a graph.
+# Targets: Assets/VfxAgentDemo/Effects/Double.vfxoperator
+#          Assets/VfxAgentDemo/Effects/UsesSubgraph.vfx
+
+# --- part 1: the operator subgraph ---
+newsubgraph operator Assets/VfxAgentDemo/Effects/Double.vfxoperator
+subparam in float "X" 10
+subparam out float "Y"
+
+# Y = X + X
+addop Add add1
+link2 P:X Op:add1.a
+link2 P:X Op:add1.b
+link2 O:add1 P:Y
+save
+
+# --- part 2: a graph that references the subgraph as an operator ---
+copy Packages/com.unity.visualeffectgraph/Editor/Templates/Simple_Loop.vfx Assets/VfxAgentDemo/Effects/UsesSubgraph.vfx
+addsubgraph op Assets/VfxAgentDemo/Effects/Double.vfxoperator S1
+
+# X = 40 -> Y = 80 particles per second.
+setin Op:S1.X 40
+link2 O:S1.Y "B:Spawn/Constant Spawn Rate/Rate"
+
+save
+compile

@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.tga binary
+*.fbx binary
+*.exr binary
