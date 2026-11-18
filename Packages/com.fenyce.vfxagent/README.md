@@ -1,6 +1,6 @@
 # VFX Agent (`com.fenyce.vfxagent`)
 
-Editor-only Unity package (UPM) that exposes the **VFX Graph package's internal editor API** so an agent
+Unity package (UPM, editor-only apart from one small runtime component) that exposes the **VFX Graph package's internal editor API** so an agent
 (Claude Code / OpenCode) can inspect, author, compile and diagnose Unity VFX Graph (`.vfx`) assets from the
 `unity` CLI — without ever hand-editing the YAML.
 
@@ -17,14 +17,16 @@ each op.
 - **Create** — `addop`, `addblock`, `addctx`, `addvariant`.
 - **Edit values & settings** — `set`, `setctx`, `setop`, `setin`, `setting`, `opsetting`, `enable` / `disable`,
   `space`, `hlsl`.
-- **Wiring** — `link2`, `unlink`, `linkflow`, `unlinkflow` (parameter shortcuts: `link`, `linkop`, `linkctx`).
+- **Wiring** — `link2`, `unlink` / `unlink?`, `linkflow`, `unlinkflow` (parameter shortcuts: `link`, `linkop`, `linkctx`).
 - **Remove** — `removeblock`, `removeop`, `removectx`, `paramdelete`.
-- **Blackboard** — `param`, `paramset`, `paramrename`, `category`, `attr`.
+- **Blackboard** — `param` (incl. `vector4` / `color`), `paramset`, `paramrename`, `paramlist`, `paramprune`, `category`, `attr`.
 - **Subgraphs** — `newsubgraph`, `subparam`, `addsubgraph`, `refreshparents`, `tosubgraph`.
 - **Clipboard** — `clipcopy`, `clippaste` (contexts, blocks, operators, parameters; survives `open`).
 - **Safety** — a failing line stops the script and rolls the whole graph back (in memory) to the last checkpoint.
 - **Verification** — `VfxCoverage.Run` (library coverage: 21/21 contexts, 244/244 operators, 135/135 blocks
-  creatable; 236/244 operators wired) and `VfxSelfTest.Run` (39 regression checks).
+  creatable; 236/244 operators wired) and `VfxSelfTest.Run` (69 regression checks).
+- **Runtime** — `VfxPropertyHold`: re-applies exposed values every LateUpdate (a VisualEffect drops values set from
+  code when it is disabled and enabled again).
 
 ## Known limits
 
@@ -43,10 +45,12 @@ each op.
 | `Editor/VfxClipboard.cs` | the model-level clipboard used by `clipcopy` / `clippaste` |
 | `Editor/VfxCoverage.cs` | library coverage counter: `VfxCoverage.Run(outFile)` |
 | `Editor/VfxSelfTest.cs` | regression self-test: `VfxSelfTest.Run(reportPath)` |
+| `Runtime/VfxPropertyHold.cs` | runtime component that keeps exposed values set from code (assembly `Fenyce.VfxAgent.Runtime`) |
 | `Skills~/vfx-graph/SKILL.md` | the skill that documents every call and op |
+| `Skills~/vfx-graph/RECIPES.md` | tested effect techniques (randomness, drift, filaments, ripples, skinned points, homing...) |
 | `Samples~/SimpleLoopExample.vfxscript` | a worked op-script that builds a tunable effect from the `Simple_Loop` template |
 
-All tool sources live in `Editor/`. See the repository README for the full guide.
+The tool sources live in `Editor/`, the one runtime component in `Runtime/`. See the repository README for the full guide.
 
 ## Requirements
 
@@ -132,8 +136,9 @@ unity command eval --caller plugin --skill unity-cli --format json --file "$env:
 The three main entry points:
 
 - `VfxGraphTool.Describe(path, compile:false)` — readable graph dump; run this first.
-- `VfxGraphOps.ApplyToFile(scriptPath, reportPath)` — apply a whole op-script on the next editor tick, then poll for
-  the report file (`VfxGraphOps.Apply(script)` runs synchronously when the report is not flushed).
+- `VfxGraphOps.ApplyToFile(scriptText, reportPath)` — apply a whole op-script on a later editor tick, then poll for
+  the report file. Pending jobs survive a domain reload; `VfxGraphTool.RunPendingJobs()` runs a late one at once, and
+  `VfxGraphOps.Apply(script)` runs synchronously.
 - `VfxCoverage.Run(outFile)` — enumerate the whole VFX library into a fresh graph and write a coverage report.
 
 For checks after a change, `VfxSelfTest.Run(reportPath)` replays the known-good op scripts and writes a pass/fail report.

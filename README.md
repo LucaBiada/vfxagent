@@ -67,13 +67,15 @@ Editor, and reads back a plain-text **description** of the result, including com
 | **Subgraphs** | Create operator and block subgraph assets, define their inputs and outputs, use a subgraph as an operator, block or context, refresh the graphs that use a subgraph, and **convert a selection of operators into a subgraph operator** (boundary links become its interface). |
 | **Clipboard** | Copy and paste operators, parameters, whole contexts with their blocks and data, and single blocks, inside one graph or across graphs, keeping values, settings and internal links. |
 | **Safety** | A script that fails on any line rolls the graph back to its last good state, so a half-applied edit never stays behind. |
-| **Verification** | Library coverage counter, and a 39-check regression self-test you can run in one call. |
+| **Verification** | Library coverage counter, and a 69-check regression self-test you can run in one call. |
+| **Runtime helper** | `VfxPropertyHold`, a component that keeps values set from code: a VisualEffect drops them when it is disabled and enabled again. |
+| **Recipes** | Tested effect techniques for agents (`Skills~/vfx-graph/RECIPES.md`): hash randomness, individual drift, emergent filaments, touch ripples, floor collision, twinkle, skinned points for several bodies, homing after turbulence. |
 
 ## Requirements
 
 - **Unity 6000.6** (tested on 6000.6.7f1). The package pins `"unity": "6000.6"`.
 - **VFX Graph 17.6.0**, which ships with Unity 6000.6 and is declared as a dependency. Tested with **URP 17.6.0**
-  (this demo) and **HDRP 17.6.0**; the self-test passes 39/39 on both.
+  (this demo) and **HDRP 17.6.0**; the self-test passes 39/39 on both (46/46 for 0.1.2 on HDRP 17.6.0; 69/69 for 0.1.3 on URP 17.6.0).
 - The **`unity` CLI** (package `com.unity.pipeline`, experimental; this demo uses `0.10.0-exp.1`) to drive the Editor from a shell. The package's C# does
   not depend on it; the CLI is only the transport.
 - An agent that can run shell commands, for example **Claude Code** or **OpenCode**.
@@ -105,7 +107,7 @@ automatically, with no manifest entry needed. Alternatively, keep it anywhere an
 unity command eval 'return UnityEditor.Compilation.CompilationPipeline.GetAssemblyDefinitionFilePathFromAssemblyName("Unity.Testing.VisualEffectGraph.Editor");' --format json
 ```
 
-The path must point into `Packages/com.fenyce.vfxagent/`. Then run the self-test (see below) and expect `39/39`.
+The path must point into `Packages/com.fenyce.vfxagent/`. Then run the self-test (see below) and expect `69/69`.
 
 > **Only one copy.** The package's assembly has a fixed name (see [How it works](#how-it-works)). If an older copy
 > of the tool exists under `Assets/` (for example `Assets/VfxAuthoring/`), delete it first, in Edit mode. Otherwise Unity reports
@@ -188,7 +190,8 @@ The result is a line-by-line log:
 
 > **The 5-second rule.** The CLI waits at most about 5 s for an eval. For long scripts or big graphs, write the output
 > to a file inside the eval (`System.IO.File.WriteAllText(path, VfxGraphOps.Apply(script))`) or use
-> `VfxGraphOps.ApplyToFile(scriptText, reportPath)`, then read the file.
+> `VfxGraphOps.ApplyToFile(scriptText, reportPath)`, then read the file. A deferred job survives a domain reload and
+> always writes its file; if it is late, `VfxGraphTool.RunPendingJobs()` runs it at once.
 
 > **Never in Play mode.** Don't apply scripts, save assets or compile while the Editor is in Play mode. Check
 > `EditorApplication.isPlaying` first.
@@ -245,7 +248,7 @@ share a name (`And` exists as both a logical and a bitwise operator), add `#k`, 
 | `open <path>` | target an existing graph (`.vfx`, `.vfxoperator`, `.vfxblock`) |
 | `save` | write the target with the package's own writer |
 | `compile` | compile like the importer and log `success`, `systems`, `shaders` |
-| `describe` | append a `Describe` dump of the target to the log |
+| `describe` | append a `Describe` dump of the target to the log (inputs fed by a parameter show `<- P:<name>`) |
 
 ### Create
 | Op | Effect |
@@ -267,7 +270,8 @@ share a name (`And` exists as both a logical and a bitwise operator), add `#k`, 
 | `enable` / `disable <ctx> "<block>"` | toggle a block |
 | `space <ctx> "<block>" <slot> <None\|Local\|World>` | slot space |
 | `dataspace <ctx> <Local\|World>` | coordinate space of a whole particle system |
-| `hlsl <ctx> "<block>" file=<path> function=<name>` | add or update a Custom HLSL block from a `.hlsl` file |
+| `hlsl <ctx> "<block>" file=<path> function=<name> [relink=byname\|none]` | add or update a Custom HLSL block from a `.hlsl` file (imports a fresh file; fails on an invalid block; warns on multi-function files). On update every input is unlinked, then relinked by input name (`none`: left unlinked); the log names each input's source parameter |
+| `gpucheck` | GPU shader errors of the compute kernels (never in the compile report) |
 
 ### Wire
 | Op | Effect |
@@ -275,6 +279,7 @@ share a name (`And` exists as both a logical and a bitwise operator), add `#k`, 
 | `link2 <src> <dst>` | data link (see endpoints above) |
 | `unlink <dst>` | remove every link into that input |
 | `unlink <src> <dst>` | remove that one link |
+| `unlink? ...` | same, but nothing to unlink is logged instead of stopping the script (quote specs with spaces whole: `"B:Init/My Block/_Center"`) |
 | `linkflow <fromCtx> <toCtx>` / `unlinkflow <fromCtx> <toCtx>` | flow link between contexts |
 | `link "<param>" <ctx> "<block>" <slot>` | shortcut: parameter → block input |
 | `linkop "<param>" <OperatorType> <slot>` / `linkctx "<param>" <ctx> <slot>` | shortcuts: parameter → operator / context input |
@@ -290,9 +295,11 @@ share a name (`And` exists as both a logical and a bitwise operator), add `#k`, 
 ### Blackboard
 | Op | Effect |
 |---|---|
-| `param <type> "<name>" [value]` | create or update an exposed parameter (`float int bool vector3 mesh texture2d gradient curve skinnedmesh transform`) |
+| `param <type> "<name>" [value]` | create or update an exposed parameter (`float int bool vector3 vector4 color mesh texture2d gradient curve skinnedmesh transform graphicsbuffer`; colours `(r,g,b[,a])`, HDR allowed) |
 | `paramset "<name>" key=value ...` | `exposed=true\|false`, `tooltip="..."`, `category="..."`, `order=<n>`, `value=<v>`, `range=<min>;<max>`, `enum=A;B;C`, `filter=Default` |
 | `paramrename "<old>" "<new>"` | rename (error if the new name exists) |
+| `paramlist [unused]` | log the input parameters and what each feeds (`unused`: only those linked to nothing) |
+| `paramprune [disabled]` | delete parameters linked to nothing (`disabled`: also those that only feed disabled blocks) |
 | `category add\|rename\|delete "<name>" ["<new>"]` | categories; *delete* moves members to the root (the window deletes them) |
 | `attr add "<name>" <type> ["description"]` | custom attribute (`float int uint bool vector2 vector3 vector4`) |
 | `attr rename\|delete\|order ...` | rename, delete or reorder a custom attribute |
@@ -440,14 +447,16 @@ a script. (`tosubgraph` writes its new asset immediately; a rolled-back conversi
 ## Verification: coverage and self-test
 
 ```csharp
-return VfxSelfTest.Run(@"C:/work/selftest.md");   // -> "selftest: 39/39 checks passed"
+return VfxSelfTest.Run(@"C:/work/selftest.md");   // -> "selftest: 69/69 checks passed"
 return VfxCoverage.Run(@"C:/work/coverage.md");   // -> creation, reachability and wiring counts per kind
 ```
 
-- **`VfxSelfTest`** builds fresh graphs under `Assets/VfxTests/SelfTest/` from the package template and checks 39
-  expected results across 11 scenarios: Blackboard, errors, subgraphs, unlink/remove, rollback, flow, clipboard
-  (operators and contexts) and `tosubgraph`. It's the gate for any change to the tool: when the interpreter was
-  deliberately replaced with an older version, the score dropped to 19/35. It passes 39/39 on URP and HDRP.
+- **`VfxSelfTest`** builds fresh graphs under `Assets/VfxTests/SelfTest/` from the package template and checks 69
+  expected results across 21 scenarios: Blackboard (incl. colour / vector4 params, `paramlist`, `paramprune`), errors,
+  subgraphs, unlink/remove (incl. `unlink?`), rollback, flow, clipboard (operators and contexts), `tosubgraph`, Custom
+  HLSL (invalid blocks, GPU errors, relinking after a signature change), the deferred `...ToFile` jobs and the runtime
+  `VfxPropertyHold`. It's the gate for any change to the tool: when the interpreter was
+  deliberately replaced with an older version, the score dropped to 19/35. 0.1.1 passed 39/39 on URP and HDRP; 0.1.3 passes 69/69 on URP.
 - **`VfxCoverage`** creates every context, operator and block of the node library, reports which are reachable by
   type name and by library name, and tries to wire every operator's output into a compatible input
   (17.6.0, URP: 235 of 243 operators wired, 2 have no output, 6 need a block configured for their shape).
@@ -496,6 +505,8 @@ A typical agent loop is: **Describe → write a small script → Apply → read 
 | `Multiple assemblies with equivalent name 'Unity.Testing.VisualEffectGraph.Editor'` | An old copy of the tool is still in `Assets/`. Delete it in Edit mode. |
 | `'VfxGraphOps' does not exist` in an eval | The package isn't installed or the project has compile errors. Check the assembly path (see [Install](#install)) and the Console. |
 | The eval times out after ~5 s | The work is too long for one CLI call. Write results to a file inside the eval and read the file. |
+| An `...ToFile` report never appears | Run `VfxGraphTool.RunPendingJobs()`: it runs pending jobs now (`no pending jobs` = they ran: check the report path). |
+| Values set from code revert to the graph defaults | The VisualEffect was disabled and enabled again, which drops runtime values. Use `VfxPropertyHold`. |
 | `Multiple Unity Editors are running` | Pass `--port <n>` or `--project-path <path>` on every command. |
 | A quoted name is split apart | Quote the whole token: `"B:Spawn/Constant Spawn Rate/Rate"`, `key="value with spaces"`. |
 | `no block named '...'` / `no ... named '...'` | Run `describe`, or read the error, which lists the valid names or the closest library names. |
@@ -506,7 +517,7 @@ A typical agent loop is: **Describe → write a small script → Apply → read 
 
 | Path | What |
 |---|---|
-| `Packages/com.fenyce.vfxagent/` | **the package**: `Editor/` (C#), `Skills~/` (agent skill), `Samples~/` (example op-script), `README.md`, `CHANGELOG.md`, `LICENSE.md` |
+| `Packages/com.fenyce.vfxagent/` | **the package**: `Editor/` (C#), `Runtime/` (`VfxPropertyHold`), `Skills~/` (agent skill and recipes), `Samples~/` (example op-script), `README.md`, `CHANGELOG.md`, `LICENSE.md` |
 | `Assets/VfxAgentDemo/Scripts/` | the six demo op-scripts |
 | `Assets/VfxAgentDemo/Effects/` | the effects they build (committed, so the demo works right after cloning) |
 | `Assets/VfxAgentDemo/Editor/` | `VfxAgentDemoBuilder`: runs the scripts and builds `Demo.unity` |

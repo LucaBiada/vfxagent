@@ -143,106 +143,168 @@ public static class VfxGraphTool
         return sb.ToString();
     }
 
-    /// Same as Describe(compile: true), but runs on the next editor tick and writes the report to a file, so a slow
+    /// Same as Describe(compile: true), but runs on a later editor tick and writes the report to a file, so a slow
     /// compile doesn't hit the CLI's 5 s main-thread limit. Poll for the file.
-    public static string DescribeToFile(string assetPath, string outFile)
-    {
-        if (System.IO.File.Exists(outFile)) System.IO.File.Delete(outFile);
-        EditorApplication.delayCall += () =>
-        {
-            string text;
-            try { text = Describe(assetPath, true); }
-            catch (Exception e) { text = "FAILED: " + e; }
-            System.IO.File.WriteAllText(outFile, text);
-        };
-        return "scheduled -> " + outFile;
-    }
+    public static string DescribeToFile(string assetPath, string outFile) => RunLater("describe", assetPath, outFile);
 
     /// Forces a real import compile: drops the VFX window's cached "authoring" compile result for the asset (the importer
     /// reuses it instead of compiling, so a stale/empty cache keeps producing an empty asset), then reimports.
-    /// Runs on the next editor tick and writes a report (incl. compiled system counts on scene VisualEffects) to outFile.
-    public static string ForceReimportToFile(string assetPath, string outFile)
-    {
-        if (System.IO.File.Exists(outFile)) System.IO.File.Delete(outFile);
-        EditorApplication.delayCall += () =>
-        {
-            var sb = new StringBuilder();
-            var logs = new List<string>();
-            Application.LogCallback cb = (m, st, t) => { if (t != LogType.Log) logs.Add(t + ": " + m); };
-            Application.logMessageReceived += cb;
-            try
-            {
-                VFXGraph.UnregisterAuthoringCompileData(AssetDatabase.GUIDFromAssetPath(assetPath));
-                AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
-                sb.AppendLine("reimported " + assetPath);
-                var asset = AssetDatabase.LoadAssetAtPath<UnityEngine.VFX.VisualEffectAsset>(assetPath);
-                foreach (var vfx in UnityEngine.Object.FindObjectsByType<UnityEngine.VFX.VisualEffect>())
-                {
-                    if (vfx.visualEffectAsset != asset) continue;
-                    vfx.Reinit();
-                    var p = new List<string>(); vfx.GetParticleSystemNames(p);
-                    var s = new List<string>(); vfx.GetSpawnSystemNames(s);
-                    sb.AppendLine($"  {vfx.name}: particleSystems={p.Count} spawners={s.Count}");
-                }
-            }
-            catch (Exception e) { sb.AppendLine("FAILED: " + e); }
-            finally { Application.logMessageReceived -= cb; }
-            sb.AppendLine("warnings/errors during import:" + (logs.Count == 0 ? " none" : "\n  " + string.Join("\n  ", logs)));
-            System.IO.File.WriteAllText(outFile, sb.ToString());
-        };
-        return "scheduled -> " + outFile;
-    }
+    /// Runs on a later editor tick and writes a report (incl. compiled system counts on scene VisualEffects) to outFile.
+    public static string ForceReimportToFile(string assetPath, string outFile) => RunLater("reimport", assetPath, outFile);
 
     /// Compiles the graph the way the importer does (Runtime mode, PrepareGraph) and reports what came out:
     /// success flag, number of compiled systems (and their names/types), plus compile errors. Writes to outFile.
-    public static string CompileReportToFile(string assetPath, string outFile)
+    public static string CompileReportToFile(string assetPath, string outFile) => RunLater("compile", assetPath, outFile);
+
+    // ---------- deferred jobs (every *ToFile call) ----------
+    // The reports sometimes never appeared with a bare EditorApplication.delayCall (2026-11-08, 2026-11-17, editor idle).
+    // Causes that can drop a delayCall: a domain reload before the next tick, an exception thrown before the old code's
+    // try (CompileReportToFile loaded the graph outside it), another delayCall subscriber throwing in the same multicast.
+    // So each job is kept in SessionState (survives domain reloads), driven by EditorApplication.update AND delayCall
+    // (whichever ticks first), the editor loop is woken, and the report file is written whatever the job does.
+
+    [Serializable] class Job { public string kind, arg, outFile; }
+    [Serializable] class JobList { public List<Job> jobs = new List<Job>(); }
+    const string JobsKey = "com.fenyce.vfxagent.PendingJobs";
+
+    static JobList PendingJobs()
+    {
+        var json = SessionState.GetString(JobsKey, "");
+        return string.IsNullOrEmpty(json) ? new JobList() : JsonUtility.FromJson<JobList>(json) ?? new JobList();
+    }
+
+    internal static string RunLater(string kind, string arg, string outFile)
     {
         if (System.IO.File.Exists(outFile)) System.IO.File.Delete(outFile);
-        EditorApplication.delayCall += () =>
+        var list = PendingJobs();
+        list.jobs.Add(new Job { kind = kind, arg = arg, outFile = outFile });
+        SessionState.SetString(JobsKey, JsonUtility.ToJson(list));
+        HookJobs();
+        return "scheduled -> " + outFile;
+    }
+
+    static void HookJobs()
+    {
+        EditorApplication.update -= RunPendingJobsTick;
+        EditorApplication.update += RunPendingJobsTick;
+        EditorApplication.delayCall += RunPendingJobsTick;
+        EditorApplication.QueuePlayerLoopUpdate();   // wake an idle editor loop
+    }
+
+    [InitializeOnLoadMethod]
+    static void ResumeJobs() { if (PendingJobs().jobs.Count > 0) HookJobs(); }   // jobs scheduled before a domain reload
+
+    /// Runs every pending *ToFile job now (normally called by the editor tick; callable by hand when a report is late).
+    public static string RunPendingJobs()
+    {
+        var list = PendingJobs();
+        if (list.jobs.Count == 0) { EditorApplication.update -= RunPendingJobsTick; return "no pending jobs"; }
+        if (EditorApplication.isCompiling) return "waiting: compiling";   // resumes after the reload
+        SessionState.EraseString(JobsKey);   // take them before running: a job may schedule another
+        foreach (var j in list.jobs)
         {
-            var sb = new StringBuilder();
-            var logs = new List<string>();
-            Application.LogCallback cb = (m, st, t) => { if (t != LogType.Log) logs.Add(t + ": " + m + (t == LogType.Exception ? "\n" + st : "")); };
-            Application.logMessageReceived += cb;
-            var graph = LoadGraph(assetPath);
-            // VFXCompilationMode is engine-internal (not visible here): get/set it through reflection.
-            var getMode = typeof(VFXGraph).GetMethod("GetCompilationMode", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            var setMode = typeof(VFXGraph).GetMethod("SetCompilationMode", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            object oldMode = getMode.Invoke(graph, null);
+            string text;
             try
             {
-                setMode.Invoke(graph, new[] { Enum.Parse(oldMode.GetType(), "Runtime") });
-                sb.AppendLine($"compilation mode was {oldMode}, compiling as Runtime");
-                graph.PrepareGraph();
-                graph.errorManager.RefreshCompilationReport();
-                var output = graph.Compile();
-                sb.AppendLine($"runtime compile success={output.success}");
-                object desc = output.assetDesc;
-                foreach (var f in desc.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                text = j.kind switch
                 {
-                    var v = f.GetValue(desc);
-                    if (v is Array arr)
-                    {
-                        sb.AppendLine($"  {f.Name}: {arr.Length}");
-                        if (f.Name.ToLower().Contains("system"))
-                            foreach (var s in arr)
-                            {
-                                var t = s.GetType();
-                                string Get(string n) => (t.GetField(n, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(s) ?? t.GetProperty(n)?.GetValue(s))?.ToString() ?? "?";
-                                sb.AppendLine($"     - name={Get("name")} type={Get("type")} capacity={Get("capacity")}");
-                            }
-                    }
-                }
-                var rep = graph.errorManager.compileReporter;
-                foreach (var m in new VFXModel[] { graph }.Concat(graph.children).Concat(graph.children.OfType<VFXContext>().SelectMany(c => c.children)))
-                    foreach (var e in rep.GetDirtyModelErrors(m)) sb.AppendLine($"  ERR [{m.GetType().Name} {m.name}] {e.type}: {e.error} {e.description}");
+                    "apply" => VfxGraphOps.Apply(j.arg),
+                    "describe" => Describe(j.arg, true),
+                    "compile" => CompileReport(j.arg),
+                    "reimport" => ForceReimport(j.arg),
+                    _ => "FAILED: unknown job kind " + j.kind
+                };
             }
-            catch (Exception e) { sb.AppendLine("FAILED: " + e); }
-            finally { setMode.Invoke(graph, new[] { oldMode }); Application.logMessageReceived -= cb; }
-            sb.AppendLine("log warnings/errors:" + (logs.Count == 0 ? " none" : "\n  " + string.Join("\n  ", logs)));
-            System.IO.File.WriteAllText(outFile, sb.ToString());
-        };
-        return "scheduled -> " + outFile;
+            catch (Exception e) { text = "FAILED: " + e; }
+            try
+            {
+                var dir = System.IO.Path.GetDirectoryName(j.outFile);
+                if (!string.IsNullOrEmpty(dir)) System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.WriteAllText(j.outFile, text);
+            }
+            catch (Exception e) { Debug.LogError($"VFX Agent: could not write the report {j.outFile}: {e.Message}\n{text}"); }
+        }
+        return $"ran {list.jobs.Count} job(s)";
+    }
+
+    static void RunPendingJobsTick() => RunPendingJobs();
+
+    static string ForceReimport(string assetPath)
+    {
+        var sb = new StringBuilder();
+        var logs = new List<string>();
+        Application.LogCallback cb = (m, st, t) => { if (t != LogType.Log) logs.Add(t + ": " + m); };
+        Application.logMessageReceived += cb;
+        try
+        {
+            VFXGraph.UnregisterAuthoringCompileData(AssetDatabase.GUIDFromAssetPath(assetPath));
+            AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
+            sb.AppendLine("reimported " + assetPath);
+            var asset = AssetDatabase.LoadAssetAtPath<UnityEngine.VFX.VisualEffectAsset>(assetPath);
+            foreach (var vfx in UnityEngine.Object.FindObjectsByType<UnityEngine.VFX.VisualEffect>())
+            {
+                if (vfx.visualEffectAsset != asset) continue;
+                vfx.Reinit();
+                var p = new List<string>(); vfx.GetParticleSystemNames(p);
+                var s = new List<string>(); vfx.GetSpawnSystemNames(s);
+                sb.AppendLine($"  {vfx.name}: particleSystems={p.Count} spawners={s.Count}");
+            }
+        }
+        catch (Exception e) { sb.AppendLine("FAILED: " + e); }
+        finally { Application.logMessageReceived -= cb; }
+        sb.AppendLine("warnings/errors during import:" + (logs.Count == 0 ? " none" : "\n  " + string.Join("\n  ", logs)));
+        return sb.ToString();
+    }
+
+    static string CompileReport(string assetPath)
+    {
+        var sb = new StringBuilder();
+        var logs = new List<string>();
+        Application.LogCallback cb = (m, st, t) => { if (t != LogType.Log) logs.Add(t + ": " + m + (t == LogType.Exception ? "\n" + st : "")); };
+        Application.logMessageReceived += cb;
+        VFXGraph graph = null;
+        object oldMode = null;
+        // VFXCompilationMode is engine-internal (not visible here): get/set it through reflection.
+        var getMode = typeof(VFXGraph).GetMethod("GetCompilationMode", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        var setMode = typeof(VFXGraph).GetMethod("SetCompilationMode", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        try
+        {
+            graph = LoadGraph(assetPath);
+            oldMode = getMode.Invoke(graph, null);
+            setMode.Invoke(graph, new[] { Enum.Parse(oldMode.GetType(), "Runtime") });
+            sb.AppendLine($"compilation mode was {oldMode}, compiling as Runtime");
+            graph.PrepareGraph();
+            graph.errorManager.RefreshCompilationReport();
+            var output = graph.Compile();
+            sb.AppendLine($"runtime compile success={output.success}");
+            object desc = output.assetDesc;
+            foreach (var f in desc.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                var v = f.GetValue(desc);
+                if (v is Array arr)
+                {
+                    sb.AppendLine($"  {f.Name}: {arr.Length}");
+                    if (f.Name.ToLower().Contains("system"))
+                        foreach (var s in arr)
+                        {
+                            var t = s.GetType();
+                            string Get(string n) => (t.GetField(n, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(s) ?? t.GetProperty(n)?.GetValue(s))?.ToString() ?? "?";
+                            sb.AppendLine($"     - name={Get("name")} type={Get("type")} capacity={Get("capacity")}");
+                        }
+                }
+            }
+            var rep = graph.errorManager.compileReporter;
+            foreach (var m in new VFXModel[] { graph }.Concat(graph.children).Concat(graph.children.OfType<VFXContext>().SelectMany(c => c.children)))
+                foreach (var e in rep.GetDirtyModelErrors(m)) sb.AppendLine($"  ERR [{m.GetType().Name} {m.name}] {e.type}: {e.error} {e.description}");
+        }
+        catch (Exception e) { sb.AppendLine("FAILED: " + e); }
+        finally
+        {
+            if (graph != null && oldMode != null) setMode.Invoke(graph, new[] { oldMode });
+            Application.logMessageReceived -= cb;
+        }
+        sb.AppendLine("log warnings/errors:" + (logs.Count == 0 ? " none" : "\n  " + string.Join("\n  ", logs)));
+        return sb.ToString();
     }
 
     /// Particle systems only compile when their data's owner list is ordered Init ... Update ... Output
@@ -356,11 +418,19 @@ public static class VfxGraphTool
         }
     }
 
-    // "<- O<n>.<slot>" for an input slot's incoming link(s) (empty when nothing is wired).
+    // "<- O<n>.<slot>" for an input slot's incoming link(s), "<- P:<name>" for a parameter (empty when nothing is wired).
     static string InputLink(VFXSlot s, Func<VFXModel, string> id)
     {
         if (s == null || !s.HasLink(true)) return "";
-        return "  <- " + string.Join(", ", AllLinks(s).Select(l => id(OwnerModel(l)) + "." + l.path));
+        return "  <- " + string.Join(", ", AllLinks(s).Select(l => OwnerModel(l) is VFXParameter ? SourceName(l) : id(OwnerModel(l)) + "." + l.path));
+    }
+
+    /// An output slot as the op scripts name it: P:<param> (sub-slot in parentheses), else <OperatorType>.<slot path>.
+    internal static string SourceName(VFXSlot l)
+    {
+        if (OwnerModel(l) is VFXParameter p && !string.IsNullOrEmpty(p.exposedName))
+            return "P:" + p.exposedName + (l.IsMasterSlot() ? "" : "(" + l.path + ")");
+        return OwnerModel(l)?.GetType().Name + "." + l.path;
     }
 
     static void AppendLinks(StringBuilder sb, VFXSlot s, Func<VFXModel, string> id, string label)
@@ -369,13 +439,89 @@ public static class VfxGraphTool
         if (links.Count > 0) sb.AppendLine($"    {label} {s.path} -> " + string.Join(", ", links.Select(l => id(OwnerModel(l)) + "." + l.path)));
     }
 
-    static IEnumerable<VFXSlot> AllLinks(VFXSlot s)
+    internal static IEnumerable<VFXSlot> AllLinks(VFXSlot s)
     {
         foreach (var l in s.LinkedSlots) yield return l;
         foreach (var c in s.children) foreach (var l in AllLinks(c)) yield return l;
     }
 
     static VFXModel OwnerModel(VFXSlot s) => s.owner as VFXModel;
+
+    /// <summary>The model's own validation messages ("type: error description"), the same Describe prints after "!!".</summary>
+    internal static List<string> ModelErrors(VFXModel m)
+    {
+        var list = new List<string>();
+        try
+        {
+            var rep = new VFXErrorReporter(VFXErrorOrigin.Invalidate);
+            m.GenerateErrors(rep);
+            foreach (var e in rep.GetDirtyModelErrors(m)) list.Add($"{e.type}: {e.error} {e.description}".Trim());
+        }
+        catch (Exception e) { list.Add("(error check failed: " + e.GetType().Name + ")"); }
+        return list;
+    }
+
+    /// <summary>
+    /// Returns the GPU shader errors of the graph's compute kernels. A Custom HLSL that touches an attribute the context does
+    /// not store ("invalid subscript"), or a syntax error, only shows up here: the compile report still says success.
+    /// Render (output) shaders are not checked.
+    /// </summary>
+    public static string GpuCheck(string path)
+    {
+        // Compile the graph like the importer (Runtime mode) and take its generated kernel sources; each compute kernel is
+        // compiled again as a temporary .compute asset, whose import gives real compiler messages (the VFX sub-asset
+        // kernels keep none, and a reimport of an unchanged graph reuses cached kernels and logs nothing).
+        var g = LoadGraph(path);
+        var getMode = typeof(VFXGraph).GetMethod("GetCompilationMode", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        var setMode = typeof(VFXGraph).GetMethod("SetCompilationMode", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        object old = getMode.Invoke(g, null);
+        var sources = new List<(string name, string source)>();
+        try
+        {
+            setMode.Invoke(g, new[] { Enum.Parse(old.GetType(), "Runtime") });
+            g.PrepareGraph();
+            var output = g.Compile();
+            object desc = output.assetDesc;
+            var shaders = desc.GetType().GetField("shaderSourceDesc", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(desc) as Array;
+            if (shaders != null)
+                foreach (var sd in shaders)
+                {
+                    var t = sd.GetType();
+                    bool compute = (bool)(t.GetField("compute")?.GetValue(sd) ?? false);
+                    if (!compute) continue;
+                    sources.Add(((string)t.GetField("name")?.GetValue(sd), (string)t.GetField("source")?.GetValue(sd)));
+                }
+        }
+        finally { setMode.Invoke(g, new[] { old }); }
+        const string Tmp = "Assets/__VfxGpuCheck";
+        var errs = new List<string>();
+        try
+        {
+            if (!AssetDatabase.IsValidFolder(Tmp)) AssetDatabase.CreateFolder("Assets", "__VfxGpuCheck");
+            for (int i = 0; i < sources.Count; i++)
+            {
+                string file = $"{Tmp}/k{i}.compute";
+                System.IO.File.WriteAllText(file, sources[i].source);
+                AssetDatabase.ImportAsset(file, ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
+                var cs = AssetDatabase.LoadAssetAtPath<ComputeShader>(file);
+                if (cs == null) { errs.Add($"[{sources[i].name}] did not import as a compute shader"); continue; }
+                // the compile runs lazily: asking for each kernel makes it compile now, then the messages exist
+                bool broken = false;
+                foreach (System.Text.RegularExpressions.Match km in System.Text.RegularExpressions.Regex.Matches(sources[i].source, @"#pragma\s+kernel\s+(\w+)"))
+                {
+                    string kn = km.Groups[1].Value;
+                    if (!cs.HasKernel(kn) || !cs.IsSupported(cs.FindKernel(kn))) broken = true;
+                }
+                int before = errs.Count;
+                foreach (var m in ShaderUtil.GetComputeShaderMessages(cs))
+                    if (m.severity == UnityEditor.Rendering.ShaderCompilerMessageSeverity.Error) errs.Add($"[{sources[i].name}] {m.message} (line {m.line})");
+                if (broken && errs.Count == before) errs.Add($"[{sources[i].name}] a kernel does not compile (no message text)");
+            }
+        }
+        finally { AssetDatabase.DeleteAsset(Tmp); }
+        return errs.Count == 0 ? $"gpucheck: {sources.Count} compute kernel(s), no shader errors" : $"gpucheck: {errs.Count} shader error(s) in {sources.Count} compute kernel(s)\n  " + string.Join("\n  ", errs);
+    }
+
 
     static void AppendErrors(StringBuilder sb, VFXModel m, string indent)
     {

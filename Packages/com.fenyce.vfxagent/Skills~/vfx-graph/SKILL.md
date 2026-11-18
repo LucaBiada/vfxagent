@@ -16,25 +16,28 @@ Engine-internal types are not visible even to this assembly (VisualEffectResourc
 VFXCompilationMode, VisualEffectAssetDesc): reach them through reflection (see LoadGraph, CompileReportToFile).
 
 ## After changing the tool
-Run `VfxSelfTest.Run(@"<report path>")` and require `39/39` (or the current total) before using the changed tool.
+Run `VfxSelfTest.Run(@"<report path>")` and require `69/69` (or the current total) before using the changed tool.
 Run `VfxCoverage.Run` after library-related changes.
 
 ## Calls (from `unity command eval ... --result-only '<code>'`)
 - `VfxGraphTool.Describe(path, compile:false)` - readable dump: contexts + flow links, blocks with settings/inputs/links,
   exposed parameters, operators, validation errors. Fast; use it first.
 - `VfxGraphTool.DescribeToFile(path, outFile)` / `CompileReportToFile(path, outFile)` / `ForceReimportToFile(path, outFile)` -
-  slow work (compiles take > 5 s, the CLI main-thread limit) runs on the next editor tick and writes a report file;
-  poll with `EditorApplication.QueuePlayerLoopUpdate()` evals until the file exists. Use forward-slash paths (`cygpath -m`).
+  slow work (compiles take > 5 s, the CLI main-thread limit) runs on a later editor tick and writes a report file;
+  poll until the file exists. Use forward-slash paths (`cygpath -m`). Since 0.1.3 every job is kept in SessionState
+  (survives a domain reload), driven by both `EditorApplication.update` and `delayCall`, and always writes its file
+  (`FAILED: ...` on an exception). A report still missing after a few seconds: `VfxGraphTool.RunPendingJobs()` runs the
+  pending jobs at once and says how many it ran (`no pending jobs` = they already ran: check the path).
 - `CompileReportToFile` compiles like the importer (Runtime mode) and lists the compiled systems: "success=True" with
   **0 systems** means every system was silently skipped (see Lessons).
 - `FixOwnerOrder(path)` - reorders particle data owners (Init, Update, Output) and saves.
 - `Save(graph)` (internal) - writes through `VisualEffectResourceExtensions.WriteAssetWithSubAssets`, like the window's Save.
 
 ## Editing: use the op-script interpreter (NO C# recompile per task)
-`VfxGraphOps.ApplyToFile(@"<script>", "<report path>")` applies a whole list of edits in one go on the next editor
-tick and writes a per-line report (stops at the first bad line, saying what exists). If the report never appears
-(delayCall not flushing, seen 2026-11-08 with the editor "ready"), call `VfxGraphOps.Apply(script)` synchronously in the
-eval instead: it may pass the 5 s limit but completes; check its returned report. The full op list is below; the
+`VfxGraphOps.ApplyToFile(@"<script>", "<report path>")` applies a whole list of edits in one go on a later editor
+tick and writes a per-line report (stops at the first bad line, saying what exists). If the report does not appear,
+`VfxGraphTool.RunPendingJobs()` runs it now; or call `VfxGraphOps.Apply(script)` synchronously in the eval: a ~60-line
+script with `compile` at the end stays under the 5 s limit, and a longer one still completes; check its returned report. The full op list is below; the
 header of `Packages/com.fenyce.vfxagent/Editor/VfxGraphOps.cs` is the source of truth when the C# changes.
 Workflow: Describe once -> write the full script
 -> one ApplyToFile -> read report (compile line: systems > 0). Only touch the C# when an op is genuinely missing, and
@@ -73,8 +76,15 @@ context made by `addctx`, `addsubgraph ctx` or `clippaste` earlier in the same s
 - `setctx <ctx> <slot>=<value> ...` - context input values (e.g. `bounds=aabox(0,6,0;50,24,50)`).
 - `setop <OperatorType>[#n] <slot>=<value> ...` - input values of the first, or n-th, operator of that type.
 - `setting <ctx> ["<block>"] <name>=<value> ...` - model SETTINGS (not slots); enums by name, e.g. `blendMode=Additive`.
-- `param <float|int|bool|vector3|mesh|texture2d|gradient|curve|skinnedmesh|transform> "<name>" [value]` -
-  create or update an exposed parameter.
+- `param <float|int|bool|vector3|vector4|color|mesh|texture2d|gradient|curve|skinnedmesh|transform|graphicsbuffer> "<name>" [value]` -
+  create or update an exposed parameter. `vector4` / `color` values: `(r,g,b,a)` or `(r,g,b)` (a = 1), HDR > 1 allowed;
+  the same syntax works in `paramset "<name>" value=(0.4,0.42,0.5)` and `set`/`setin` on Color / Vector4 slots.
+  Set a Color from C# with `VisualEffect.SetVector4`.
+- `paramlist [unused]` - log every input parameter and what it feeds (`B:<ctx>/<block>/<slot>`, `(DISABLED)` marked);
+  `unused` = only those linked to nothing (leftovers of a copied graph, which also block `paramrename`).
+- `paramprune [disabled]` - delete the input parameters linked to nothing; `disabled` also deletes those whose every
+  link goes into a disabled block (disabled blocks KEEP their links). A parameter feeding an operator is always kept.
+  In a subgraph an unlinked interface input is part of its interface: do not prune there.
 - `paramrename "<old>" "<new>"` - rename an exposed parameter; errors if `<new>` already exists.
   e.g. `paramrename "Speed" "Velocity"`
 - `paramdelete "<name>"` - delete an exposed parameter (unlinks and removes it).
@@ -160,6 +170,9 @@ context made by `addctx`, `addsubgraph ctx` or `clippaste` earlier in the same s
   e.g. `link2 P:Wind B:Init/Velocity/velocity`. An operator `<id>` can also be an existing operator's type: `O:Multiply`, `Op:Multiply#1.b`.  |  `link2 O:density1.Result Op:mul1.a`  |
   `link2 O:mul1 P:Result` (feeds the subgraph's `out` interface parameter `Result`)
 - `unlink <dst>` - remove the data link(s) on that input slot (`VFXSlot.UnlinkAll`); errors if nothing is linked.
+  `unlink? ...` (same arguments) only logs `unlink? nothing linked ...` and goes on: use it in scripts that clean up
+  links that may or may not exist. A spec with spaces is quoted WHOLE: `unlink? "B:Init/Dust Spawn/_Center"`
+  (not `B:Init/"Dust Spawn"/_Center`).
   `unlink <src> <dst>` - remove only the link between that source (`P:`/`O:`, same syntax as `link2`) and that input
   (`VFXSlot.Unlink`); errors if they are not linked. Compound slots link per sub-slot
   (`arcSphere.sphere.center`), so pass the exact endpoint you linked. e.g. `unlink B:Init/Velocity/velocity`  |
@@ -171,18 +184,38 @@ context made by `addctx`, `addsubgraph ctx` or `clippaste` earlier in the same s
 - `link "<param>" <ctx> "<block>" <slot>` - link an exposed parameter to a block input.
 - `linkop "<param>" <OperatorType> <slot>` - link an exposed parameter to an operator input.
 - `linkctx "<param>" <ctx> <slot>` - link an exposed parameter to a context input (e.g. a mesh output's mesh).
-- `hlsl <ctx> "<block name>" file=<path> function=<name>` - add or update a Custom HLSL block using a .hlsl file.
+- `hlsl <ctx> "<block name>" file=<path> function=<name> [relink=byname|none]` - add or update a Custom HLSL block using
+  a .hlsl file. Its inputs are the function's parameters with a `_` prefix (`_Radius`). On an UPDATE every input is
+  unlinked first (the swapped slots kept their links by POSITION, so a changed signature left inputs linked to the old
+  parameter at that position); `relink=byname` (default) then relinks each old link to the input of the same name,
+  `relink=none` leaves every input unlinked. The log names each input's source (`_Gain<-P:Gain, _Extra`) and lists
+  the old links that found no input (`dropped old links: _Amount<-P:Amount`). New params: give them unique names, and
+  link every input explicitly (`link2 P:Gain "B:Update/My Block/_Gain"`).
+  A file written to disk in the same session is imported first. The op FAILS (and rolls back) when the block reports a
+  validation error (e.g. "The attribute `stripIndex` is not writable"): such a block would be skipped at compile time
+  while the compile report says success. It WARNS when the file defines several attribute functions (see Lessons).
 - `refreshparents <subgraph asset path>` - after saving the subgraph, find every root `.vfx` in `Assets/` whose
   recursive dependencies include it, then `PrepareGraph()` and force-reimport each one (logging every refreshed path).
   e.g. `refreshparents Assets/VFX/Density.vfxoperator`
-- `save` / `compile` / `describe` - save; print a Runtime-mode compile report (check `systems=` > 0); print a
-  Describe dump into the report. Subgraph nodes include their `m_Subgraph` asset path in the Describe dump.
-Values: `0.3` `12` `true` `(0,-4,0)` `asset:Assets/x.png` `aabox(cx,cy,cz;sx,sy,sz)` `gradient:white-fade`
-`curve:0=1;0.7=0.5;1=0` (AnimationCurve keys time=value, smoothed).
+- `save` / `compile` / `describe` - save; print a Runtime-mode compile report (check `systems=` > 0; it also lists every
+  model validation error as `INVALID [...]`, the badges the graph window shows); print a Describe dump into the report.
+  Subgraph nodes include their `m_Subgraph` asset path in the Describe dump. An input fed by a parameter shows
+  `<- P:<name>` (the `link2` source syntax); one fed by an operator shows `<- O<n>.<slot>`.
+- `gpucheck` - compile the graph and report the GPU shader errors of its compute kernels (each generated kernel is
+  compiled as a temporary .compute asset, then deleted). Run it after `save` whenever the graph has Custom HLSL: shader
+  errors ("invalid subscript", syntax) never reach the compile report. Render (output) shaders are not checked.
+Values: `0.3` `12` `true` `(0,-4,0)` `(r,g,b,a)` `asset:Assets/x.png` `aabox(cx,cy,cz;sx,sy,sz)` `gradient:white-fade`
+`gradient:0=r,g,b,a;0.1=r,g,b,a` (HDR allowed) `curve:0=1;0.7=0.5;1=0` (AnimationCurve keys time=value, smoothed).
+
+## Recipes
+`RECIPES.md` next to this file: tested techniques (per-particle hash randomness, start fully formed, individual
+drift, galaxy clumps, emergent filaments, touch ripples, floor collision, twinkle, skinned points baked to a texture
+for several bodies, restyle without touching behaviour, inward homing after Turbulence, a shader and a VFX sharing one
+procedural edge, holding runtime values, budget). Read it before building a new effect.
 
 ## Editing internals
 - Copy a working graph as the starting point (`AssetDatabase.CopyAsset`), `LoadGraph` the copy, edit, `Save(graph)`,
-  then `CompileReportToFile` to confirm systems > 0. Long edits: wrap in a `...ToFile` delayCall like the others.
+  then `CompileReportToFile` to confirm systems > 0. Long edits: run them through `VfxGraphTool.RunLater` like the `...ToFile` calls.
 - Toggle a block: `SetEnabled(block, bool)` (writes `block.activationSlot.value`; `VFXBlock.enabled` is read-only).
 - Slot values: `Input(model, "name").value = ...`; links: `inputSlot.Link(outputSlot)`. `Input` lists the real slot
   names when a name is wrong.
@@ -202,6 +235,33 @@ Values: `0.3` `12` `true` `(0,-4,0)` `asset:Assets/x.png` `aabox(cx,cy,cz;sx,sy,
 components show what the imported asset really contains. `aliveCount` reads back from the GPU: 0 in Edit mode means nothing.
 
 ## Lessons
+- A VisualEffect DROPS values set from code (`SetFloat`, `SetVector4`, ...) when it is disabled and enabled again: they
+  silently revert to the graph defaults. Use the package's runtime component `VfxPropertyHold`
+  (`hold.SetFloat("Gather", 0.7f)`; it re-applies every held value each LateUpdate) or re-set the values after enabling.
+- Writing `attributes.alpha` (or any attribute the system does not store yet) from an Update HLSL block needs it STORED:
+  `addblock Init SetAttribute attribute=alpha` first. `age` is stored as soon as lifetime/age are used.
+- Disabled blocks keep their input links (Describe still shows them): they keep "unused" parameters alive
+  (`paramprune disabled` removes those).
+- Edit mode tells nothing about a running effect: `aliveCount` reads 0 and `Simulate()` + a manual render showed
+  nothing. Judge the look in Play (and never compile or apply during Play).
+- `param texture2d` accepts a RenderTexture at runtime (`VisualEffect.SetTexture`).
+- Particle strips: no block can set a particle's strip (Custom HLSL: "The attribute `stripIndex` is not writable"; a
+  `Set Strip Index` block only gives a constant). Feed the Initialize context's own `stripIndex` INPUT per particle
+  instead, e.g. `addvariant op "Get|_Spawn Index" si` + `addvariant op "Divide" div` + `link2 O:si Op:div.a` +
+  `link2 P:PointsPerStrip Op:div.b` + `link2 O:div C:Init/stripIndex`. `particleIndexInStrip` then follows spawn order,
+  and both `stripIndex` and `particleIndexInStrip` are readable in a strip system's Update (Custom HLSL).
+- A `Single Burst` spawner loops (the context's `LoopDuration`): a second burst refills strips / adds particles. For a
+  one-shot, data-driven system raise it (`setctx Spawn LoopDuration=1000000`) and re-init from C# when the data size changes.
+- Per-point data from C#: a float texture works everywhere (`param texture2d`, an RGBAFloat `Texture2D`, one texel per
+  point, x = index in strip, y = strip) read in Custom HLSL with `VFXSampler2D P` and `P.t.Load(int3(x, y, 0))`; or
+  (0.1.2+) `param graphicsbuffer` + `VisualEffect.SetGraphicsBuffer` and a `StructuredBuffer<T>` HLSL parameter.
+- Every Custom HLSL block includes the WHOLE .hlsl file in its own context: a second function that touches an attribute
+  that context does not store breaks the GPU compile of the other block ("invalid subscript"). One function per file.
+- A system's title (`Update@Trail`) belongs to its particle data: remove or relink the Update/Output before the Init,
+  or the later selectors no longer find the title.
+- Compute shader compiler messages are filled lazily: `ShaderUtil.GetComputeShaderMessages` is empty until the kernel
+  is queried (`FindKernel` / `IsSupported`). A reimport of an unchanged graph reuses cached kernels and logs nothing.
+- Self-test checks: avoid wants that also match the success text ("shader error" is inside "no shader errors").
 - A system compiles only if its `VFXDataParticle` owner list starts with the Init context and ends with an Output
   (`VFXDataParticle.CanBeCompiled`). Wrong order => silently skipped, no error anywhere.
 - A disconnected Output gets its own empty particle data: particles simulate but nothing renders.

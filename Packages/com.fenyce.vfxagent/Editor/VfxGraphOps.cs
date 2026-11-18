@@ -1,6 +1,7 @@
 // Text-driven VFX Graph editing: one call applies a whole list of edits (no C# recompile per task).
 // Call from `unity command eval`:  return VfxGraphOps.ApplyToFile(@"<script>", "C:/.../report.txt");
-// then poll for the report file (the work runs on the next editor tick: compiles take > 5 s).
+// then poll for the report file (the work runs on a later editor tick: compiles take > 5 s; a late report:
+// VfxGraphTool.RunPendingJobs() runs it now; short scripts: VfxGraphOps.Apply(script) synchronously).
 // A failing line stops the script and rolls the graph back to the last checkpoint (after copy/open/newsubgraph/save),
 // so partial edits never stay in memory.
 //
@@ -18,7 +19,9 @@
 //   setop <OperatorType>[#n] <slot>=<value> ...  operator input values (first, or n-th, operator of that type)
 //   Slot names may be dotted sub-slot paths: arcSphere.sphere.center (unnamed top slot: .center)
 //   setting <ctx> ["<block>"] <name>=<value> ...  model settings (not slots): enums by name, e.g. blendMode=Additive
-//   param <float|int|bool|vector3|mesh|texture2d|gradient|curve|skinnedmesh|transform> "<name>" [value]   create or update an exposed parameter
+//   param <float|int|bool|vector3|vector4|color|mesh|texture2d|gradient|curve|skinnedmesh|transform|graphicsbuffer> "<name>" [value]   create or update an exposed parameter
+//                            (vector4/color values: (r,g,b,a) or (r,g,b) with a=1; HDR > 1 allowed)
+//                            (graphicsbuffer: set from C# with VisualEffect.SetGraphicsBuffer; read it in Custom HLSL as StructuredBuffer<T>)
 //   addblock <ctx> <BlockType> [setting=value ...]   append a new block (e.g. PositionMesh sourceMesh=SkinnedMeshRenderer)
 //   addctx <ContextType> <id> [setting=value ...]   new context, e.g. VFXLitPlanarPrimitiveOutput uvMode=Flipbook blendMode=Opaque; select it as #<id> in later lines
 //   linkflow <fromCtx> <toCtx>   flow link (Update -> new Output); unlinkflow <fromCtx> <toCtx>   remove that flow link
@@ -35,13 +38,22 @@
 //   addvariant <ctx|op|block> "<libraryName>" <id|ctx> [setting=value ...]   new node from a VFXLibrary descriptor, picked by the exact name the VFX Graph node search shows (quote names with spaces or '|'; disambiguates entries that share a type: Log/Log2/Log10, Normalize/Safe Normalize, 'Output Particle|...'); a trailing 'Name#k' (1-based) picks the k-th descriptor with that name in the kind's list order (And#2 = 2nd 'And'). ctx/op: 2nd=name, 3rd=id; block: 2nd=ctx, 3rd=name.
 //   link2 <src> <dst>        src: P:<param> | O:<id>[.slot]    dst: Op:<id>.<slot> | B:<ctx>/<block>/<slot> | C:<ctx>/<slot> | P:<output param>   (quote specs with spaces; <id> may also be an existing operator's type, Multiply or Multiply#1)
 //   unlink <dst>             remove every data link into an input (same dst syntax); unlink <src> <dst> removes just that one link
+//   unlink? ...              same, but nothing linked is only logged instead of stopping the script
+//                            (quote a spec with spaces WHOLE: "B:Init/Dust Spawn/_Center", not B:Init/"Dust Spawn"/_Center)
 //   setin <dst> <value>      set a value on an operator / block / context input slot (same dst syntax)
 //   space <ctx> "<block>" <slot> <None|Local|World>   set a spaceable slot's space (e.g. a skinned mesh transform -> World)
 //   dataspace <ctx> <Local|World>   coordinate space of the particle system (the Space setting of its contexts)
 //   link "<param>" <ctx> "<block>" <slot>   /  linkop "<param>" <OperatorType> <slot>   /  linkctx "<param>" <ctx> <slot>
-//   hlsl <ctx> "<block name>" file=<path> function=<name>   add or update a Custom HLSL block using a .hlsl file
+//   hlsl <ctx> "<block name>" file=<path> function=<name> [relink=byname|none]   add or update a Custom HLSL block using a .hlsl file
+//                            (on update every input is unlinked, then byname (default) relinks the old links to inputs of the same
+//                            name, none leaves all inputs unlinked; the log prints each input's source as Name<-P:Param)
+//                            (imports a file just written to disk; fails if the block reports an error, e.g. "attribute is not writable";
+//                            warns when the file holds several functions: every block compiles the WHOLE file in its own context)
 //   refreshparents <subgraph asset path>    PrepareGraph + force reimport every root .vfx in Assets that depends on the subgraph
+//   paramlist [unused]   list input parameters and what each feeds (unused: only those linked to nothing)
+//   paramprune [disabled]   delete input parameters linked to nothing (disabled: also those that only feed disabled blocks)
 //   save   |   compile   |   describe
+//   gpucheck   compile the graph and report the GPU shader errors of its compute kernels (they never reach the compile report)
 // Values: 0.3  12  true  (0,-4,0)  asset:Assets/x.png  aabox(cx,cy,cz;sx,sy,sz)  gradient:white-fade
 //         curve:0=1;0.7=0.5;1=0  (AnimationCurve keys time=value, smoothed)
 using System;
@@ -58,18 +70,8 @@ using UnityEngine.VFX;
 
 public static class VfxGraphOps
 {
-    public static string ApplyToFile(string script, string outFile)
-    {
-        if (System.IO.File.Exists(outFile)) System.IO.File.Delete(outFile);
-        EditorApplication.delayCall += () =>
-        {
-            string text;
-            try { text = Apply(script); }
-            catch (Exception e) { text = "FAILED: " + e; }
-            System.IO.File.WriteAllText(outFile, text);
-        };
-        return "scheduled -> " + outFile;
-    }
+    // Runs Apply on a later editor tick (kept across domain reloads, see VfxGraphTool.RunLater) and writes the log to outFile.
+    public static string ApplyToFile(string script, string outFile) => VfxGraphTool.RunLater("apply", script, outFile);
 
     /// Runs the script synchronously; stops at the first failing line and reports it.
     public static string Apply(string script)
@@ -380,16 +382,26 @@ public static class VfxGraphOps
                         dst.Link(src); dirty = true; log.AppendLine($"{lineNo}: linked {t[1]} -> {t[2]}"); break;
                     }
                     case "unlink":   // unlink <dst>   every data link into that input; unlink <src> <dst>   only that one link
+                    case "unlink?":  // same, lenient: nothing to unlink is logged, not an error
                     {
-                        if (t.Count != 2 && t.Count != 3) throw new Exception("unlink takes <dst> or <src> <dst>");
+                        bool lenient = t[0] == "unlink?";
+                        if (t.Count != 2 && t.Count != 3) throw new Exception("unlink takes <dst> or <src> <dst> (quote a spec with spaces whole: \"B:Init/My Block/slot\")");
                         var dst = InSlot(g, ops, t[t.Count - 1]);
                         if (t.Count == 2)
                         {
-                            if (!dst.HasLink()) throw new Exception($"nothing is linked into {t[1]}");
+                            if (!dst.HasLink())
+                            {
+                                if (!lenient) throw new Exception($"nothing is linked into {t[1]} (use unlink? to skip)");
+                                log.AppendLine($"{lineNo}: unlink? nothing linked into {t[1]}"); break;
+                            }
                             dst.UnlinkAll(); dirty = true; log.AppendLine($"{lineNo}: unlinked all {t[1]}"); break;
                         }
                         var src = OutSlot(g, ops, t[1]);
-                        if (!dst.LinkedSlots.Contains(src)) throw new Exception($"{t[1]} is not linked to {t[2]}");
+                        if (!dst.LinkedSlots.Contains(src))
+                        {
+                            if (!lenient) throw new Exception($"{t[1]} is not linked to {t[2]} (use unlink? to skip)");
+                            log.AppendLine($"{lineNo}: unlink? {t[1]} is not linked to {t[2]}"); break;
+                        }
                         dst.Unlink(src); dirty = true; log.AppendLine($"{lineNo}: unlinked {t[1]} -> {t[2]}"); break;
                     }
                     case "setin":   // setin <dst> <value>   value on an operator / block / context input slot
@@ -506,6 +518,36 @@ public static class VfxGraphOps
                         }
                         dirty = true; log.AppendLine($"{lineNo}: paramset '{t[1]}' {string.Join(" ", t.Skip(2))}"); break;
                     }
+                    case "paramlist":   // paramlist [unused]   input parameters and what they feed
+                    {
+                        bool onlyUnused = t.Count > 1 && t[1] == "unused";
+                        var ps = g.children.OfType<VFXParameter>().Where(p => !p.isOutput).OrderBy(p => p.exposedName).ToList();
+                        var lines = new List<string>();
+                        foreach (var p in ps)
+                        {
+                            var feeds = ParamTargets(p);
+                            if (onlyUnused && feeds.Count > 0) continue;
+                            lines.Add($"  '{p.exposedName}' : {p.type?.Name}{(p.exposed ? "" : " (not exposed)")} -> " +
+                                (feeds.Count == 0 ? "(nothing)" : string.Join(", ", feeds.Select(DescribeTarget))));
+                        }
+                        log.AppendLine($"{lineNo}: paramlist{(onlyUnused ? " unused" : "")}: {lines.Count} parameter(s)");
+                        foreach (var l in lines) log.AppendLine(l);
+                        break;
+                    }
+                    case "paramprune":   // paramprune [disabled]   delete input parameters linked to nothing (disabled: or only to disabled blocks)
+                    {
+                        bool alsoDisabled = t.Count > 1 && t[1] == "disabled";
+                        // shortcut: a parameter feeding an operator that only feeds disabled blocks is kept; follow operator chains if that matters
+                        var dead = g.children.OfType<VFXParameter>().Where(p => !p.isOutput).Where(p =>
+                        {
+                            var feeds = ParamTargets(p);
+                            return feeds.Count == 0 || alsoDisabled && feeds.All(d => d.owner is VFXBlock b && !b.enabled);
+                        }).ToList();
+                        var names = dead.Select(p => "'" + p.exposedName + "'").ToList();
+                        foreach (var p in dead) VFXModel.RemoveModel(p);
+                        if (dead.Count > 0) { g.UIInfos.Sanitize(g); dirty = true; }
+                        log.AppendLine($"{lineNo}: paramprune{(alsoDisabled ? " disabled" : "")}: removed {dead.Count} parameter(s){(dead.Count > 0 ? ": " + string.Join(", ", names) : "")}"); break;
+                    }
                     case "category":   // category add|rename|delete "<name>" [<new>]   blackboard categories
                     {
                         var cats = g.UIInfos.categories;
@@ -598,6 +640,8 @@ public static class VfxGraphOps
                         log.AppendLine(CompileReport(g)); break;
                     case "describe":
                         log.AppendLine(VfxGraphTool.Describe(path, false)); break;
+                    case "gpucheck":   // gpucheck   GPU shader errors of the compute kernels
+                        log.AppendLine($"{lineNo}: " + VfxGraphTool.GpuCheck(path)); break;
                     default: throw new Exception("unknown op '" + t[0] + "'");
                 }
             }
@@ -760,7 +804,8 @@ public static class VfxGraphOps
         if (byName != null)
         {
             var named = list.Where(c => c.label == byName || (c.GetData() is VFXDataParticle dp && dp.title == byName)).ToList();
-            if (named.Count == 0) throw new Exception($"no {parts[0]} context named '{byName}'; names: [{string.Join(" | ", list.Select(c => c.label))}]");
+            if (named.Count == 0) throw new Exception($"no {parts[0]} context named '{byName}'; names: [{string.Join(" | ", list.Select(c => c.label + (c.GetData() is VFXDataParticle d2 && !string.IsNullOrEmpty(d2.title) ? " / title " + d2.title : "")))}]"
+                + (parts[0] != "Init" && parts[0] != "Spawn" ? " (a system title belongs to its particle data: removing or relinking the Init first drops it from the Update/Output, so remove those before the Init)" : ""));
             list = named;
         }
         // prefer contexts that are part of a connected system (have flow in)
@@ -863,6 +908,17 @@ public static class VfxGraphOps
         slots.FirstOrDefault(x => x.property.name == name)
         ?? throw new Exception($"the new subgraph node has no interface slot '{name}'; slots: [{string.Join(", ", slots.Select(x => x.property.name))}]");
 
+    // input slots a parameter feeds, over all its sub-slots
+    static List<VFXSlot> ParamTargets(VFXParameter p) => p.outputSlots.SelectMany(VfxGraphTool.AllLinks).ToList();
+
+    static string DescribeTarget(VFXSlot d)
+    {
+        var owner = d.owner as VFXModel;
+        if (owner is VFXBlock b) return $"B:{(b.GetParent() as VFXContext)?.label}/{b.name}/{d.path}{(b.enabled ? "" : " (DISABLED)")}";
+        if (owner is VFXContext c) return $"C:{c.label}/{d.path}";
+        return $"Op:{owner?.GetType().Name}.{d.path}";
+    }
+
     // ---- values ----
 
     static void SetSlot(IVFXSlotContainer m, string kv)
@@ -875,9 +931,11 @@ public static class VfxGraphOps
     static Type ParamType(string s) => s switch
     {
         "float" => typeof(float), "int" => typeof(int), "bool" => typeof(bool), "vector3" => typeof(Vector3),
+        "vector4" => typeof(Vector4), "color" => typeof(Color),
         "mesh" => typeof(Mesh), "texture2d" => typeof(Texture2D), "gradient" => typeof(Gradient),
         "curve" => typeof(AnimationCurve), "skinnedmesh" => typeof(SkinnedMeshRenderer), "transform" => typeof(UnityEditor.VFX.Transform),
-        _ => throw new Exception("param type must be float|int|bool|vector3|mesh|texture2d|gradient|curve|skinnedmesh|transform")
+        "graphicsbuffer" => typeof(GraphicsBuffer),
+        _ => throw new Exception("param type must be float|int|bool|vector3|vector4|color|mesh|texture2d|gradient|curve|skinnedmesh|transform|graphicsbuffer")
     };
 
     // custom-attribute type words -> the real VFXValueType enum members (UnityEngine.VFX namespace)
@@ -976,6 +1034,13 @@ public static class VfxGraphOps
         if (type == typeof(bool)) return bool.Parse(v);
         if (type == typeof(Vector3) || type.Name == "Position" || type.Name == "Vector" || type.Name == "DirectionType") return Vec(v.Trim('(', ')'));
         if (type == typeof(Vector2)) { var f = v.Trim('(', ')').Split(','); return new Vector2(float.Parse(f[0], Inv), float.Parse(f[1], Inv)); }
+        if (type == typeof(Vector4) || type == typeof(Color))   // (r,g,b,a) or (r,g,b) -> a=1; HDR > 1 kept
+        {
+            var f = v.Trim('(', ')').Split(',').Select(x => float.Parse(x, Inv)).ToArray();
+            if (f.Length != 3 && f.Length != 4) throw new Exception($"'{v}' needs 3 or 4 components for {type.Name}");
+            var v4 = new Vector4(f[0], f[1], f[2], f.Length > 3 ? f[3] : 1f);
+            return type == typeof(Color) ? (object)(Color)v4 : v4;
+        }
         throw new Exception($"don't know how to parse '{v}' as {type.Name}");
     }
 
@@ -997,9 +1062,18 @@ public static class VfxGraphOps
         var c = Ctx(g, t[1]);
         string file = t.FirstOrDefault(x => x.StartsWith("file="))?.Substring(5) ?? throw new Exception("hlsl needs file=");
         string fn = t.FirstOrDefault(x => x.StartsWith("function="))?.Substring(9) ?? throw new Exception("hlsl needs function=");
-        var include = AssetDatabase.LoadAssetAtPath<ShaderInclude>(file) ?? throw new Exception("no ShaderInclude at " + file);
+        var include = AssetDatabase.LoadAssetAtPath<ShaderInclude>(file);
+        if (include == null && System.IO.File.Exists(file))
+        {   // written to disk in this session but not imported yet (seen 2026-11-16): import it instead of failing
+            AssetDatabase.ImportAsset(file, ImportAssetOptions.ForceSynchronousImport);
+            include = AssetDatabase.LoadAssetAtPath<ShaderInclude>(file);
+        }
+        if (include == null) throw new Exception("no ShaderInclude at " + file + (System.IO.File.Exists(file) ? " (the file exists but did not import as a ShaderInclude)" : ""));
+        string relink = t.FirstOrDefault(x => x.StartsWith("relink="))?.Substring(7) ?? "byname";
+        if (relink != "byname" && relink != "none") throw new Exception("hlsl relink must be byname|none");
         var block = c.children.OfType<UnityEditor.VFX.Block.CustomHLSL>().FirstOrDefault(b => b.name == t[2]);
-        // relink existing inputs by name after the swap
+        // remember the old links by input NAME: after the swap the slots keep their links by POSITION, so a changed
+        // signature left inputs linked to the parameter of the old input at that position (seen 2026-11-17)
         var links = block == null ? new List<(string, VFXSlot)>() :
             block.inputSlots.SelectMany(s => s.LinkedSlots.Select(l => (s.property.name, l))).ToList();
         if (block == null)
@@ -1010,12 +1084,26 @@ public static class VfxGraphOps
         }
         block.SetSettingValue("m_ShaderFile", include);
         VfxGraphTool.SelectHlslFunction(block, fn);
-        foreach (var (name, other) in links)
-        {
-            var s = block.inputSlots.FirstOrDefault(x => x.property.name == name);
-            if (s != null && !s.HasLink()) s.Link(other);
-        }
-        log.AppendLine($"{lineNo}: hlsl '{t[2]}' in {t[1]} <- {file}:{fn}; inputs: {string.Join(", ", block.inputSlots.Select(s => s.property.name + (s.HasLink() ? "(linked)" : "")))}");
+        foreach (var s in block.inputSlots) s.UnlinkAll(true);
+        if (relink == "byname")
+            foreach (var (name, other) in links)
+            {
+                var s = block.inputSlots.FirstOrDefault(x => x.property.name == name);
+                if (s != null && !s.HasLink()) s.Link(other);
+            }
+        var dropped = links.Where(l => !block.inputSlots.Any(s => s.property.name == l.Item1 && s.LinkedSlots.Contains(l.Item2)))
+            .Select(l => l.Item1 + "<-" + VfxGraphTool.SourceName(l.Item2)).ToList();
+        log.AppendLine($"{lineNo}: hlsl '{t[2]}' in {t[1]} <- {file}:{fn} (relink={relink}); inputs: " +
+            string.Join(", ", block.inputSlots.Select(s => s.property.name + (s.HasLink(true) ? "<-" + string.Join("+", VfxGraphTool.AllLinks(s).Select(VfxGraphTool.SourceName)) : "")))
+            + (dropped.Count > 0 ? $"; dropped old links: {string.Join(", ", dropped)}" : ""));
+        // the block's own validation (e.g. "The attribute `stripIndex` is not writable"): such a block is skipped at
+        // compile time while the compile report says success, so stop here instead
+        var errs = VfxGraphTool.ModelErrors(block).Where(e => e.StartsWith("Error")).ToList();
+        if (errs.Count > 0) throw new Exception($"hlsl block '{t[2]}' is invalid: {string.Join("; ", errs)}");
+        // every Custom HLSL block includes the WHOLE file in its own context: a second function that reads or writes an
+        // attribute that context does not store breaks the GPU compile ("invalid subscript") of the other block
+        var fns = System.Text.RegularExpressions.Regex.Matches(System.IO.File.ReadAllText(file), @"\bvoid\s+(\w+)\s*\(\s*inout\s+VFXAttributes").Cast<System.Text.RegularExpressions.Match>().Select(x => x.Groups[1].Value).Distinct().ToList();
+        if (fns.Count > 1) log.AppendLine($"{lineNo}: WARNING {file} defines {fns.Count} attribute functions ({string.Join(", ", fns)}): every block compiles the whole file in its own context, so each function may only touch attributes that exist in every context using the file; prefer one function per file");
     }
 
     static string CompileReport(VFXGraph g)
@@ -1036,7 +1124,12 @@ public static class VfxGraphOps
             sb.Append($"compile: success={output.success} systems={systems?.Length} shaders={shaders?.Length}");
             var rep = g.errorManager.compileReporter;
             foreach (var m in new VFXModel[] { g }.Concat(g.children).Concat(g.children.OfType<VFXContext>().SelectMany(c => c.children)))
+            {
                 foreach (var e in rep.GetDirtyModelErrors(m)) sb.Append($"\n  ERR [{m.name}] {e.type}: {e.error} {e.description}");
+                // model validation (what the graph window badges, Describe's "!!"): not part of the compile reporter
+                if (m is VFXBlock b && !b.enabled) continue;
+                foreach (var e in VfxGraphTool.ModelErrors(m)) sb.Append($"\n  INVALID [{m.name}] {e}");
+            }
         }
         finally { setMode.Invoke(g, new[] { old }); }
         return sb.ToString();

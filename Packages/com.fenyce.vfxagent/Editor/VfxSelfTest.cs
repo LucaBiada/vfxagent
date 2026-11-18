@@ -6,6 +6,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using UnityEditor;
+using UnityEngine;
+using UnityEngine.VFX;
 
 public static class VfxSelfTest
 {
@@ -27,6 +29,7 @@ public static class VfxSelfTest
         public string Name;
         public string Script;
         public Check[] Checks;
+        public Func<string> Code;   // instead of Script: C# that returns the "log" to check
     }
 
     public static string Run(string reportPath)
@@ -40,7 +43,7 @@ public static class VfxSelfTest
         foreach (var c in cases)
         {
             string log;
-            try { log = VfxGraphOps.Apply(c.Script); }
+            try { log = c.Code != null ? c.Code() : VfxGraphOps.Apply(c.Script); }
             catch (Exception e) { log = "EXCEPTION: " + e; }
 
             var describes = new Dictionary<string, string>();
@@ -107,6 +110,19 @@ public static class VfxSelfTest
         string clipA = Root + "ClipA.vfx", clipB = Root + "ClipB.vfx";
         string clip2A = Root + "Clip2A.vfx", clip2B = Root + "Clip2B.vfx";
         string conv = Root + "Conv.vfx", convSub = Root + "Conv.vfxoperator";
+        string hl = Root + "Hlsl.vfx", hl2 = Root + "HlslBad.vfx", hl3 = Root + "HlslGpu.vfx";
+        // HLSL test files are written to disk WITHOUT importing them: hlsl must import them itself (0.1.2)
+        string hOk = Root + "SelfTestOk.hlsl", hTwo = Root + "SelfTestTwo.hlsl", hBad = Root + "SelfTestBad.hlsl", hGpu = Root + "SelfTestGpu.hlsl";
+        File.WriteAllText(hOk, "void SelfTestOk(inout VFXAttributes attributes, float Amount)\n{\n    attributes.size *= Amount;\n}\n");
+        File.WriteAllText(hTwo, "void SelfTestTwoA(inout VFXAttributes attributes)\n{\n    attributes.size *= 1.0;\n}\n\nvoid SelfTestTwoB(inout VFXAttributes attributes)\n{\n    attributes.size *= 2.0;\n}\n");
+        File.WriteAllText(hBad, "void SelfTestBad(inout VFXAttributes attributes)\n{\n    attributes.stripIndex = 1;\n}\n");
+        File.WriteAllText(hGpu, "void SelfTestGpu(inout VFXAttributes attributes)\n{\n    attributes.size = undeclaredThing;\n}\n");
+
+        string hr = Root + "HlslRelink.vfx", hSig = Root + "SelfTestSig.hlsl", hSig2 = Root + "SelfTestSig2.hlsl";
+        File.WriteAllText(hSig, "void SelfTestSig(inout VFXAttributes attributes, float Amount, float Gain)\n{\n    attributes.size *= Amount * Gain;\n}\n");
+        // same function, new signature: Gain moved to position 0 (where Amount was), Extra is new
+        File.WriteAllText(hSig2, "void SelfTestSig(inout VFXAttributes attributes, float Gain, float Extra)\n{\n    attributes.size *= Gain + Extra;\n}\n");
+        string colors = Root + "Colors.vfx", lenient = Root + "Lenient.vfx", prune = Root + "Prune.vfx";
 
         string blackboard = S(
             $"copy {Src} {bb}", "param float \"Rate\" 64", "link \"Rate\" Spawn \"Constant Spawn Rate\" Rate",
@@ -158,8 +174,58 @@ public static class VfxSelfTest
 
         return new[]
         {
+            C("param_color_vector4", S($"copy {Src} {colors}", "param color \"Tint\" (2,0.5,0.25,1)", "param vector4 \"V\" (1,2,3)",
+                    "param color \"Plain\"", "paramset \"Plain\" value=(0.4,0.42,0.5)", "save"),
+                Log("ERROR", not: true),
+                Desc(colors, "EXPOSED 'Tint' : Color = RGBA(2.000, 0.500, 0.250, 1.000)"),
+                Desc(colors, "EXPOSED 'V' : Vector4 = (1.00, 2.00, 3.00, 1.00)"),
+                Desc(colors, "EXPOSED 'Plain' : Color = RGBA(0.400, 0.420, 0.500, 1.000)")),
+            C("hlsl_relink", S($"copy {Src} {hr}", "param float \"Amount\" 2", "param float \"Gain\" 3",
+                    $"hlsl Update \"Sig\" file={hSig} function=SelfTestSig",
+                    "link2 P:Amount \"B:Update/Sig/_Amount\"", "link2 P:Gain \"B:Update/Sig/_Gain\"",
+                    $"hlsl Update \"Sig\" file={hSig2} function=SelfTestSig", "save"),
+                Log("(relink=byname); inputs: _Gain<-P:Gain, _Extra; dropped old links: _Amount<-P:Amount"),
+                Desc(hr, "in  _Gain : Single = 0  <- P:Gain"),
+                Desc(hr, "in  _Extra : Single = 0  <-", not: true)),
+            C("hlsl_relink_none_paramprune", S($"open {hr}", $"hlsl Update \"Sig\" file={hSig2} function=SelfTestSig relink=none",
+                    "paramlist unused", "param float \"Off\" 1", "link \"Off\" Update \"Linear Drag\" dragCoefficient",
+                    "disable Update \"Linear Drag\"", "paramprune", "paramlist", "paramprune disabled", "save"),
+                Log("inputs: _Gain, _Extra; dropped old links: _Gain<-P:Gain"),
+                Log("'Amount' : Single -> (nothing)"),
+                Log("paramprune: removed 2 parameter(s): 'Amount', 'Gain'"),
+                Log("'Off' : Single -> B:"),
+                Log("paramprune disabled: removed 1 parameter(s): 'Off'"),
+                Desc(hr, "'Off'", not: true)),
+            C("unlink_lenient", S($"copy {Src} {lenient}", "unlink? \"B:Spawn/Constant Spawn Rate/Rate\"", "param float \"After\" 1", "save",
+                    "unlink \"B:Spawn/Constant Spawn Rate/Rate\""),
+                Log("unlink? nothing linked into B:Spawn/Constant Spawn Rate/Rate"),
+                Log("use unlink? to skip"),
+                Desc(lenient, "'After' : Single = 1")),
+            new Case { Name = "tofile_jobs", Code = () =>
+                {
+                    string a = Path.GetFullPath("Temp/VfxSelfTest_apply.txt"), b = Path.GetFullPath("Temp/VfxSelfTest_compile.txt");
+                    VfxGraphOps.ApplyToFile(S($"copy {Src} {Root}Job.vfx", "save"), a);
+                    VfxGraphTool.CompileReportToFile(Root + "NoSuchGraph.vfx", b);   // used to throw before writing any report
+                    string ran = VfxGraphTool.RunPendingJobs();
+                    return ran + "\n" + (File.Exists(a) ? File.ReadAllText(a) : "NO APPLY REPORT") + "\n" + (File.Exists(b) ? File.ReadAllText(b) : "NO COMPILE REPORT")
+                        + "\nagain: " + VfxGraphTool.RunPendingJobs();
+                },
+                Checks = new[] { Log("ran 2 job(s)"), Log("saved " + Root + "Job.vfx"), Log("FAILED"), Log("NO ", not: true), Log("again: no pending jobs") } },
+            C("hlsl_checks", S($"copy {Src} {hl}", "param graphicsbuffer \"Buf\"",
+                    $"hlsl Update \"Ok\" file={hOk} function=SelfTestOk", $"hlsl Update \"Two\" file={hTwo} function=SelfTestTwoA", "save"),
+                Log("hlsl 'Ok'"),
+                Log("WARNING"),
+                Desc(hl, "'Buf' : GraphicsBuffer")),
+            C("hlsl_invalid", S($"copy {Src} {hl2}", $"hlsl Update \"Bad\" file={hBad} function=SelfTestBad"),
+                Log("is invalid"),
+                Log("not writable")),
+            C("gpucheck", S($"copy {Src} {hl3}", $"hlsl Update \"Gpu\" file={hGpu} function=SelfTestGpu", "save", "gpucheck"),
+                Log("shader error(s) in")),
+            C("gpucheck_clean", S($"open {hl}", "gpucheck"),
+                Log("no shader errors")),
             C("blackboard", blackboard,
                 Desc(bb, "EXPOSED 'Rate' : Single = 120"),
+                Desc(bb, "<- P:Rate"),
                 Desc(bb, "category='Spawn'"),
                 Desc(bb, "tooltip='Spawn rate per second'"),
                 Desc(bb, "filter=Range  min=0 max=500"),
@@ -208,7 +274,25 @@ public static class VfxSelfTest
                 Log("dataspace Init = World"),
                 Log("ERROR", not: true),
                 Desc($"{Dir}/Space.vfx", "in  Rate : Single = 64  <- O"),
-                Desc($"{Dir}/Space.vfx", "b : Single = 3"))
+                Desc($"{Dir}/Space.vfx", "b : Single = 3")),
+            new Case { Name = "property_hold", Code = () =>
+                {
+                    var go = new GameObject("VfxSelfTestHold");
+                    try
+                    {
+                        var vfx = go.AddComponent<VisualEffect>();
+                        vfx.visualEffectAsset = AssetDatabase.LoadAssetAtPath<VisualEffectAsset>(bb);
+                        var hold = go.AddComponent<VfxPropertyHold>();
+                        hold.SetFloat("Rate", 7);
+                        float set = vfx.GetFloat("Rate");
+                        vfx.ResetOverride("Rate");   // what disabling + enabling the VisualEffect does to a runtime value
+                        float dropped = vfx.GetFloat("Rate");
+                        hold.Apply();                // what LateUpdate does every frame
+                        return $"hold: set={set} dropped={dropped} after={vfx.GetFloat("Rate")}";
+                    }
+                    finally { UnityEngine.Object.DestroyImmediate(go); }
+                },
+                Checks = new[] { Log("set=7 dropped=120 after=7") } }
         };
     }
 
